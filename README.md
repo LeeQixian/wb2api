@@ -24,11 +24,11 @@ Key 只认 `Authorization: Bearer` / `x-api-key` / `api-key` 头，**不接受 `
 ```bash
 cd ~/Projects/Utility/wb2api
 
-# 1. 加账号（三选一）
+# 1. 加账号（任选其一；token 也可带 --refresh 一起导入）
 python3 -m gateway.wbctl login --realm intl     # 浏览器 OAuth，免客户端
-python3 -m gateway.wbctl import --token '<jwt>' # 直接喂 accessToken
-#    或把 hub 那边的 accounts/*.json 拷过来（同格式）
-
+python3 -m gateway.wbctl import /path/to/auth.json          # 桌面端/旧反代的 JSON（自动识别嵌套/扁平）
+python3 -m gateway.wbctl import '<accessToken JWT>'          # 或直接喂 token
+python3 -m gateway.wbctl import - --refresh <rt>             # 或 stdin
 # 2. 起网关
 python3 -m gateway.server                       # 127.0.0.1:8788
 python3 -m gateway.server --api-key sk-local    # 顺手持久化 key

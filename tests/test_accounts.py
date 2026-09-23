@@ -143,9 +143,6 @@ class PoolTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.pool = AccountPool(self.tmp.name)
 
-    def tearDown(self):
-        self.tmp.cleanup()
-
     def test_import_token_and_duplicate_replace(self):
         jwt = make_jwt(uid="uid-i", exp=1893456000)
         a = self.pool.import_token(jwt, refresh_token="rr", nickname="n")
@@ -155,6 +152,28 @@ class PoolTests(unittest.TestCase):
         a2 = self.pool.import_token(jwt, nickname="n2")
         self.assertEqual(len(self.pool.accounts), 1)
         self.assertEqual(a2.nickname, "n2")
+
+    def test_import_credential_all_shapes(self):
+        from gateway.accounts import credential_to_kwargs
+        token = make_jwt(uid="u-nested", exp=1893456000,
+                         iss="https://copilot.tencent.com")
+        # desktop .info: nested account/auth, enterpriseID spelled capital-ID
+        info = {"account": {"uid": "u-nested", "nickname": "nicky"},
+                "auth": {"accessToken": token, "refreshToken": "rt-1"}}
+        kw = credential_to_kwargs(info)
+        self.assertEqual(kw["realm"], "cn")
+        self.assertEqual(kw["nickname"], "nicky")
+        self.assertEqual(kw["refreshToken"], "rt-1")
+        # flat hub accounts/*.json shape
+        flat = {"uid": "u-flat", "accessToken": token, "enterpriseId": "e-9"}
+        self.assertEqual(credential_to_kwargs(flat)["enterpriseId"], "e-9")
+        # raw string passthrough
+        self.assertEqual(credential_to_kwargs(token)["uid"], "u-nested")
+        a = self.pool.import_credential(json.dumps(info))
+        self.assertEqual(a.uid, "u-nested")
+        self.assertEqual(a.enterprise_id, "")
+        with self.assertRaises(ValueError):
+            self.pool.import_credential("{}", )
 
     def test_pick_round_robin_and_exclude(self):
         for uid in ("u1", "u2", "u3"):
@@ -246,7 +265,7 @@ class WbctlTests(unittest.TestCase):
 
     def test_import_list_remove_flow(self):
         token = make_jwt(uid="cli-uid", exp=1893456000)
-        rc, out, _ = self._run(["import", "--token", token])
+        rc, out, _ = self._run(["import", token])
         self.assertEqual(rc, 0)
         self.assertIn("cli-uid", out)
         rc, out, _ = self._run(["list"])
@@ -271,9 +290,9 @@ class WbctlTests(unittest.TestCase):
         self.assertIsNone(settings.get_api_key(self.dir))
 
     def test_import_broken_token_exits_1(self):
-        rc, out, err = self._run(["import", "--token", "garbage"])
+        rc, out, err = self._run(["import", "garbage"])
         self.assertEqual(rc, 1)
-        self.assertIn("not a JWT", err)
+        self.assertIn("no JWT accessToken", err)
 
 
 if __name__ == "__main__":

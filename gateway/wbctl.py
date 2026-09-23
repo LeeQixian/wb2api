@@ -3,13 +3,15 @@
     python3 -m gateway.wbctl [--dir accounts] <command> ...
 
   login [--realm intl|cn]          browser OAuth device flow, waits and saves
-  import --token <jwt> [--refresh <rt>] [--realm r] [--nickname n]
+  import <token|file|-> [--refresh <rt>] [--realm r] [--nickname n]
+      accepts a raw accessToken JWT, a desktop .info file (nested
+      account/auth shape), or a hub accounts/*.json file (flat)
   list                             one line per account
   remove <uid> | enable <uid> | disable <uid>
   refresh <uid>                    force a token refresh now
   credits [uid]                    query balance/packages (all if uid omitted)
   checkin <uid>                    CN realm daily checkin
-  set-key <key> | clear-key        gateway API key (auth off when cleared)
+  set-key [<key>] | clear-key      gateway API key (auth off when cleared)
 
 Exit code non-zero + a one-line stderr message on failure.
 """
@@ -58,13 +60,22 @@ def cmd_login(args):
 
 def cmd_import(args):
     pool = _pool(args)
-    token = args.token
-    if token == "-":
-        token = sys.stdin.read().strip()
-    account = pool.import_token(token, refresh_token=args.refresh,
-                                realm=args.realm, nickname=args.nickname)
-    print("saved: uid=%s realm=%s expires=%s file=%s"
-          % (account.uid, account.realm,
+    blob = args.source
+    if blob == "-":
+        blob = sys.stdin.read().strip()
+    elif os.path.isfile(blob):
+        # credential file: desktop .info, hub accounts/*.json, or a bare token
+        with open(blob, encoding="utf-8") as fh:
+            blob = fh.read().strip()
+    account = pool.import_credential(blob, realm=args.realm)
+    if args.refresh:
+        account.refresh_token = args.refresh
+        account.save(pool.dir)
+    if args.nickname:
+        account.nickname = args.nickname
+        account.save(pool.dir)
+    print("saved: uid=%s realm=%s nickname=%s expires=%s file=%s"
+          % (account.uid, account.realm, account.nickname,
              time.strftime("%Y-%m-%d %H:%M", time.localtime(account.expires_at))
              if account.expires_at else "?",
              os.path.basename(account.path or "")))
@@ -87,8 +98,7 @@ def cmd_list(args):
                  "y" if a.ready() else "n",
                  p.get("expiresIn") or "-",
                  credits,
-                 ("err: " + p["lastError"][:40]) if p.get("lastError") else "")
-              )
+                 ("err: " + p["lastError"][:40]) if p.get("lastError") else ""))
     return 0
 
 
@@ -160,10 +170,11 @@ def cmd_checkin(args):
 
 def cmd_set_key(args):
     key = args.key
-    if key == "-":
-        key = sys.stdin.readline().strip()
+    if not key or key == "-":
+        key = sys.stdin.readline().strip() if key == "-" else getpass.getpass("API key: ")
     if not key:
-        key = getpass.getpass("API key: ")
+        print("empty key refused; use clear-key to disable auth", file=sys.stderr)
+        return 1
     settings.set_api_key(args.dir, key)
     print("api key saved to %s (auth is now enforced on inference routes)"
           % os.path.join(args.dir, "settings.json"))
@@ -186,11 +197,11 @@ def main(argv=None):
     p.add_argument("--realm", choices=("intl", "cn"), default="intl")
     p.set_defaults(fn=cmd_login)
 
-    p = sub.add_parser("import", help="register an account from a raw token")
-    p.add_argument("--token", required=True, help="accessToken JWT ('-' = stdin)")
+    p = sub.add_parser("import", help="register from a JWT / credential file / '-'")
+    p.add_argument("source", help="accessToken JWT, path to .info or accounts/*.json, or '-'")
     p.add_argument("--refresh", default=None)
     p.add_argument("--realm", choices=("intl", "cn"), default=None)
-    p.add_argument("--nickname", default="")
+    p.add_argument("--nickname", default=None)
     p.set_defaults(fn=cmd_import)
 
     p = sub.add_parser("list", help="show accounts")
@@ -211,7 +222,7 @@ def main(argv=None):
 
     p = sub.add_parser("set-key", help="persist the gateway API key")
     p.add_argument("key", nargs="?", default=None)
-    p.set_defaults(fn=lambda a: (setattr(a, "key", a.key or "-"), cmd_set_key(a))[1])
+    p.set_defaults(fn=cmd_set_key)
 
     p = sub.add_parser("clear-key", help="remove the API key (auth off)")
     p.set_defaults(fn=cmd_clear_key)

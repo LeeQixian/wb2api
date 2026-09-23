@@ -603,6 +603,56 @@ class SessionAffinity(object):
             self.bindings.pop(key, None)
 
 
+def credential_to_kwargs(blob, realm=None):
+    """Normalize a credential in any known shape into Account() kwargs.
+
+    Accepts three formats seen in the wild:
+      1. desktop-app .info (nested):
+         {"account": {uid, nickname, enterpriseID},
+          "auth": {accessToken, refreshToken, domain?, expiresAt?}}
+      2. hub / wb2api accounts/*.json (flat to_dict() output)
+      3. a raw accessToken JWT string
+
+    uid/nickname/enterprise are taken from the file when present and
+    decoded from the JWT otherwise; realm auto-detects from the token
+    issuer (override with `realm`).
+    """
+    if isinstance(blob, (bytes, bytearray)):
+        blob = blob.decode("utf-8", "replace")
+    if isinstance(blob, str):
+        text = blob.strip()
+        blob = json.loads(text) if text.startswith("{") else {"accessToken": text}
+    if not isinstance(blob, dict):
+        raise ValueError("credential must be a JWT string or a JSON object")
+    auth = blob.get("auth") if isinstance(blob.get("auth"), dict) else {}
+    prof = blob.get("account") if isinstance(blob.get("account"), dict) else {}
+    token = str(blob.get("accessToken") or auth.get("accessToken") or "").strip()
+    if not token or token.count(".") < 2:
+        raise ValueError("no JWT accessToken found in the credential")
+    uid = str(blob.get("uid") or prof.get("uid") or jwt_uid(token) or "")
+    if not uid:
+        raise ValueError("token has no sub claim and no uid field; cannot key the account")
+    enterprise = str(blob.get("enterpriseId") or blob.get("enterpriseID")
+                     or prof.get("enterpriseId") or prof.get("enterpriseID") or "")
+    domain = str(blob.get("domain") or auth.get("domain") or "")
+    detected = realm or detect_realm_from_token(token, domain)
+    cfg = get_realm_config(detected)
+    return {
+        "uid": uid,
+        "nickname": str(blob.get("nickname") or prof.get("nickname") or "") or uid[:8],
+        "domain": domain or cfg["domain"],
+        "realm": detected,
+        "platform": "CLI",
+        "enterpriseId": enterprise,
+        "accessToken": token,
+        "refreshToken": str(blob.get("refreshToken") or auth.get("refreshToken") or ""),
+        "expiresAt": normalize_epoch(blob.get("expiresAt") or auth.get("expiresAt"))
+                     or jwt_exp(token),
+        "source": "import",
+        "enabled": True,
+    }
+
+
 class AccountPool(object):
     def __init__(self, directory, log=None):
         self.dir = directory
@@ -678,29 +728,23 @@ class AccountPool(object):
         """Register (or replace) an account from a raw accessToken.
 
         The replacement for the dashboard's import flow: paste a token from
-        any source (browser devtools, the hub's accounts/*.json) and it is
-        decoded, realm-detected and saved. Returns the Account.
+        any source (browser devtools, the hub's accounts/*.json, a desktop
+        .info file via import_credential) and it is decoded, realm-detected
+        and saved. Returns the Account.
         """
-        token = str(access_token or "").strip()
-        if not token or token.count(".") < 2:
-            raise ValueError("not a JWT access token")
-        uid = jwt_uid(token)
-        if not uid:
-            raise ValueError("token has no sub claim; cannot key the account")
-        detected = realm or detect_realm_from_token(token)
-        cfg = get_realm_config(detected)
-        account = Account({
-            "uid": uid,
-            "nickname": nickname or uid[:8],
-            "domain": cfg["domain"],
-            "realm": detected,
-            "platform": "CLI",
-            "accessToken": token,
-            "refreshToken": refresh_token or "",
-            "expiresAt": jwt_exp(token),
-            "source": "import",
-            "enabled": bool(enabled),
-        })
+        kwargs = credential_to_kwargs(access_token, realm=realm)
+        kwargs["refreshToken"] = str(refresh_token or "") or kwargs["refreshToken"]
+        if nickname:
+            kwargs["nickname"] = nickname
+        kwargs["enabled"] = bool(enabled)
+        account = Account(kwargs)
+        self.add(account)
+        return account
+
+    def import_credential(self, blob, realm=None):
+        """Register an account from desktop/hub credential JSON (see
+        credential_to_kwargs). Returns the Account."""
+        account = Account(credential_to_kwargs(blob, realm=realm))
         self.add(account)
         return account
 
