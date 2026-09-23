@@ -108,6 +108,11 @@ class ServerCase(unittest.TestCase):
         self._patch_upstream("banned_model_message", lambda m: "")
         self._patch_upstream("fetch_models",
                              lambda realm=None, pool=None: [("hy3", {"name": "HY3"})])
+        self._patch_upstream("fetch_models_all", lambda pool=None: [
+            ("hy3", {"name": "HY3", "exitRealm": "intl"}),
+            ("cn:hy3", {"name": "HY3", "exitRealm": "cn"}),
+            ("global:hy3", {"name": "HY3", "exitRealm": "intl"}),
+        ])
         self._patch_upstream("model_entry", lambda mid, meta: {
             "id": mid, "object": "model", "owned_by": "workbuddy"})
         self.httpd = srv.build_server("127.0.0.1", 0)
@@ -367,6 +372,103 @@ class _BytesIO:
 
     def close(self):
         pass
+
+
+class TestRealmPrefix(ServerCase):
+    def _patch_exclusive(self):
+        self._patch_upstream("exclusive_realm",
+                             lambda m: "cn" if m == "glm-5.3-flash" else "")
+
+    def test_global_prefix_pins_intl_exit(self):
+        # global: on a dual model -> forwarded bare, realm forced to intl
+        status, raw = self._post_chat(body={"model": "global:hy3", "messages":
+                                            [{"role": "user", "content": "hi"}]})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.calls[0]["model"], "hy3")   # stripped upstream
+        self.assertEqual(self.realms, ["intl"])
+        obj = json.loads(raw)
+        self.assertEqual(obj["model"], "global:hy3")       # echoed to client
+
+    def test_cn_prefix_pins_cn_exit(self):
+        status, _ = self._post_chat(body={"model": "cn:hy3", "messages":
+                                          [{"role": "user", "content": "hi"}]})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.calls[0]["model"], "hy3")
+        self.assertEqual(self.realms, ["cn"])
+
+    def test_prefix_beats_header(self):
+        self._patch_exclusive()
+        # cn: prefix on a cn-exclusive model -> no conflict, pinned cn
+        status, _ = self._post_chat(
+            body={"model": "cn:glm-5.3-flash", "messages":
+                  [{"role": "user", "content": "hi"}]},
+            headers={"X-Realm": "cn"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.realms, ["cn"])
+
+    def test_prefix_conflict_400(self):
+        self._patch_exclusive()
+        # global: prefix (intl) onto a cn-only model -> guarded
+        status, raw = self._post_chat(body={"model": "global:glm-5.3-flash",
+                                            "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.calls, [])
+        self.assertIn("前缀", json.loads(raw)["error"]["message"])
+
+    def test_pinned_realm_does_not_leak_across_keepalive(self):
+        # regression guard for the per-instance reset: a prefixed request
+        # followed by a bare one on the SAME connection must not inherit cn
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        for model in ("cn:hy3", "hy3"):
+            conn.request("POST", "/v1/chat/completions",
+                         body=json.dumps({"model": model,
+                                          "messages": [{"role": "user", "content": "x"}]}),
+                         headers={"Content-Type": "application/json"})
+            r = conn.getresponse()
+            r.read()
+            self.assertEqual(r.status, 200, model)
+        conn.close()
+        self.assertEqual(self.realms, ["cn", None])  # second defers to auto-routing
+
+    def test_stream_echoes_prefixed_model(self):
+        body = {"model": "cn:hy3", "stream": True,
+                "messages": [{"role": "user", "content": "hi"}]}
+        status, raw = self._post_chat(body)
+        self.assertEqual(status, 200)
+        text = raw.decode("utf-8")
+        frames = [ln for ln in text.split("\n\n") if ln.startswith("data: ")
+                  and ln != "data: [DONE]"]
+        for ln in frames:
+            obj = json.loads(ln[len("data: "):])
+            self.assertEqual(obj.get("model"), "cn:hy3")
+
+    def test_models_lists_union_with_aliases(self):
+        # default GET /v1/models now carries both exits + cn:/global: aliases
+        status, raw = self._request("/v1/models")
+        data = json.loads(raw)
+        self.assertEqual(status, 200)
+        self.assertEqual(data["realm"], "all")
+        ids = [m["id"] for m in data["data"]]
+        self.assertEqual(ids, ["hy3", "cn:hy3", "global:hy3"])
+
+    def test_models_with_header_stays_narrow(self):
+        status, raw = self._request("/v1/models", headers={"X-Realm": "cn"})
+        data = json.loads(raw)
+        self.assertEqual(data["realm"], "cn")
+        self.assertEqual([m["id"] for m in data["data"]], ["hy3"])
+
+    def test_responses_prefix_routes_and_echoes(self):
+        self._patch_exclusive()
+        status, raw = self._request("/v1/responses",
+                                    body={"model": "global:glm-5.3-flash", "input": []})
+        self.assertEqual(status, 400)   # explicit intl pin vs cn-exclusive model
+        status, raw = self._request("/v1/responses",
+                                    body={"model": "cn:glm-5.3-flash", "input": []})
+        self.assertEqual(status, 200)
+        obj = json.loads(raw)
+        self.assertEqual(obj.get("model"), "cn:glm-5.3-flash")
+        self.assertEqual(self.realms[-1], "cn")
 
 
 class TestResponsesRoute(ServerCase):

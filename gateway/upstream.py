@@ -237,6 +237,36 @@ def fetch_models(realm=None, pool=None):
     return entries
 
 
+def fetch_models_all(pool=None):
+    """Full menu across BOTH exits, independent of the global realm.
+
+    Every entry appears under its bare id (auto-routing decides the exit)
+    and under "global:<id>" / "cn:<id>" (forces that exit; the server-side
+    counterpart is translate.split_realm_prefix). Current-realm entries
+    come first so the list order still reflects what the gateway defaults
+    to. Each entry's meta gains an "exitRealm" marker for clients that
+    want to render the split.
+    """
+    out, seen = [], set()
+    catalogs = {}
+    for realm in ("intl", "cn"):
+        catalogs[realm] = fetch_models(realm=realm, pool=pool)
+    current = get_realm()
+    if current not in ("intl", "cn"):
+        current = "intl"
+    for realm in (current, "cn" if current == "intl" else "intl"):
+        prefix = "global:" if realm == "intl" else "cn:"
+        for mid, meta in catalogs[realm]:
+            for disp in (mid, prefix + mid):
+                if disp in seen:
+                    continue
+                seen.add(disp)
+                m = dict(meta or {})
+                m["exitRealm"] = realm
+                out.append((disp, m))
+    return out
+
+
 def model_entry(mid, meta):
     """Build a rich /v1/models entry from the desktop app catalog metadata.
 

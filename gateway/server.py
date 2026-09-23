@@ -392,13 +392,14 @@ class Handler(BaseHTTPRequestHandler):
         auto-routes: exclusive models pick their own exit, dual-exit models
         follow the global realm.
         """
-        req_realm = self._request_realm()
+        req_realm = getattr(self, "_pinned_realm", None) or self._request_realm()
         owner = upstream.exclusive_realm(model or "")
         if req_realm in ("intl", "cn") and owner and owner != req_realm:
             served = "国内版" if owner == "cn" else "国际版"
             used = "国内版" if req_realm == "cn" else "国际版"
-            return ("模型 %s 只在%s提供，但请求指定的是%s出口（X-Realm: %s）。"
-                    "请改用对应出口或去掉 X-Realm。" % (model, served, used, req_realm))
+            return ("模型 %s 只在%s提供，但请求指定的是%s出口"
+                    "（模型名前缀或 X-Realm: %s）。请改用对应出口或去掉前缀/X-Realm。"
+                    % (model, served, used, req_realm))
         if upstream.is_model_banned(model or ""):
             return upstream.banned_model_message(model)
         return ""
@@ -443,13 +444,25 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, info)
 
     def _get_v1_models(self):
-        req_realm = self._request_realm() or upstream.get_realm()
+        pool = refresh_pool()
+        req_realm = self._request_realm()
         try:
-            entries = upstream.fetch_models(realm=req_realm, pool=refresh_pool())
+            if req_realm in ("intl", "cn"):
+                # explicit single-exit probe (X-Realm / ?realm=) keeps the
+                # narrow view of exactly that exit's catalog
+                entries = upstream.fetch_models(realm=req_realm, pool=pool)
+                data = [upstream.model_entry(mid, meta) for mid, meta in entries]
+                return self._json(200, {"object": "list", "data": data,
+                                        "realm": req_realm})
+            # no explicit realm: the full menu across BOTH exits with
+            # cn:/global: exit aliases, independent of the global default
+            # (upstream.fetch_models_all; server side pairs with
+            #  translate.split_realm_prefix)
+            entries = upstream.fetch_models_all(pool=pool)
             data = [upstream.model_entry(mid, meta) for mid, meta in entries]
+            return self._json(200, {"object": "list", "data": data, "realm": "all"})
         except Exception as exc:
             return self._error(502, str(exc))
-        return self._json(200, {"object": "list", "data": data, "realm": req_realm})
 
     def _get_credits(self):
         refresh_pool()
@@ -505,14 +518,36 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             _chat_slots.release()
 
+    def _pin_realm(self, prefix_realm):
+        """Effective per-request exit: model-name prefix > X-Realm/?realm=.
+        None defers to upstream's model-based auto-routing. The Handler
+        instance is reused across keep-alive requests, so this recomputes
+        from scratch on every request that reaches a chat route."""
+        # None only when BOTH are absent: an explicit header still pins after
+        # a previous prefixed request on the same keep-alive connection
+        # (self._pinned_realm must never survive into that request).
+        explicit = self._request_realm()
+        self._pinned_realm = prefix_realm or explicit
+
+    def _split_model(self, raw_model):
+        model, prefix_realm = translate.split_realm_prefix(raw_model)
+        if prefix_realm:
+            self._pin_realm(prefix_realm)
+        else:
+            self._pin_realm(None)
+        return model, prefix_realm
+
     def _dispatch_chat_post(self, payload):
-        model = payload.get("model") or "hy4-preview"
+        requested = str(payload.get("model") or "hy4-preview")
+        model, prefix_realm = self._split_model(requested)
+        if prefix_realm:
+            payload["model"] = model
         blocked = self._realm_guard(model)
         if blocked:
             return self._error(400, blocked, "invalid_request_error")
         forwarded = translate.build_upstream_body(payload)
         log("chat: model=%s stream=%s msgs=%d"
-            % (model, bool(payload.get("stream")),
+            % (requested, bool(payload.get("stream")),
                len(forwarded.get("messages") or [])))
         session_key = extract_session_key(self.headers, payload)
         fp = translate.prompt_fingerprint(forwarded.get("messages"))
@@ -521,14 +556,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             upstream_resp, account = self.open_upstream(payload, session_key)
         except Exception as exc:
-            return self._upstream_error(model, exc, t_start, fp)
+            return self._upstream_error(requested, exc, t_start, fp)
         with upstream_resp:
             if want_stream:
-                return self._stream_chat(upstream_resp, model, fp, account, t_start)
-            return self._nonstream_chat(upstream_resp, model, fp, account, t_start)
+                return self._stream_chat(upstream_resp, requested, fp, account, t_start)
+            return self._nonstream_chat(upstream_resp, requested, fp, account, t_start)
 
     def _handle_responses(self, payload):
-        model = payload.get("model") or "deepseek-v4.1-flash"
+        requested = str(payload.get("model") or "deepseek-v4.1-flash")
+        model, prefix_realm = self._split_model(requested)
+        if prefix_realm:
+            payload["model"] = model
         if payload.get("previous_response_id"):
             self._handle_expect_continue()
             self._discard_body()
@@ -553,17 +591,17 @@ class Handler(BaseHTTPRequestHandler):
         t_start = time.time()
         fp = translate.prompt_fingerprint(chat_req.get("messages"))
         log("responses: model=%s stream=%s msgs=%d custom_tools=%s"
-            % (model, want_stream, len(chat_req.get("messages") or []),
+            % (requested, want_stream, len(chat_req.get("messages") or []),
                sorted(custom_names) or "-"))
         try:
             upstream_resp, account = self.open_upstream(chat_req, session_key)
         except Exception as exc:
-            return self._upstream_error(model, exc, t_start, fp)
+            return self._upstream_error(requested, exc, t_start, fp)
         with upstream_resp:
             if want_stream:
-                return self._stream_responses(upstream_resp, model, custom_names,
+                return self._stream_responses(upstream_resp, requested, custom_names,
                                               request_meta, fp, account, t_start, ns_map)
-            return self._nonstream_responses(upstream_resp, model, custom_names,
+            return self._nonstream_responses(upstream_resp, requested, custom_names,
                                              request_meta, fp, account, t_start, ns_map)
 
     def open_upstream(self, payload, session_key):
@@ -571,7 +609,7 @@ class Handler(BaseHTTPRequestHandler):
         # model (exclusive models to their own exit, shared ones to the
         # global realm).
         return upstream.open_upstream(POOL, payload, session_key=session_key,
-                                      target_realm=self._request_realm(),
+                                      target_realm=getattr(self, "_pinned_realm", None),
                                       log=log)
 
     def _upstream_error(self, model, exc, t_start, fp):
@@ -640,6 +678,16 @@ class Handler(BaseHTTPRequestHandler):
                 cleaned = translate.clean_chunk(data)
                 if not cleaned:
                     continue
+                if model:
+                    # OpenAI echoes request.model; with an exit prefix the
+                    # upstream chunks carry the bare name, so rewrite it back
+                    try:
+                        cobj = json.loads(cleaned)
+                        if cobj.get("model") != model:
+                            cobj["model"] = model
+                            cleaned = json.dumps(cobj, ensure_ascii=False)
+                    except Exception:
+                        pass
                 if first_ms is None:
                     first_ms = int((time.time() - t_start) * 1000)
                 emitted = True
@@ -694,6 +742,7 @@ class Handler(BaseHTTPRequestHandler):
         wall = int((time.time() - t_start) * 1000)
         first_at = result.pop("first_chunk_at", None)
         result.pop("elapsed_ms", None)
+        result["model"] = model   # echo the requested name, prefix included
         record_row({"model": model, "outcome": "ok", "status": 200, "stream": False,
                     "elapsed_ms": wall,
                     "ttft_ms": int((first_at - t_start) * 1000) if first_at else None,
@@ -749,6 +798,7 @@ class Handler(BaseHTTPRequestHandler):
         wall = int((time.time() - t_start) * 1000)
         chat_obj.pop("first_chunk_at", None)
         chat_obj.pop("elapsed_ms", None)
+        chat_obj["model"] = model   # echo the requested name, prefix included
         result = translate.chat_to_response(chat_obj, model, custom_names,
                                             request_meta, ns_map)
         record_row({"model": model, "outcome": "ok", "status": 200, "stream": False,

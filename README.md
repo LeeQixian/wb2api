@@ -10,7 +10,7 @@
 | `GET /health` | 免 | 存活探针 + 池状态摘要 |
 | `GET /realm` | 免 | 当前出口 |
 | `POST /realm` | key* | 切换出口 intl/cn（落盘持久化） |
-| `GET /v1/models` | 免 | 模型发现（OpenAI 客户端需要） |
+| `GET /v1/models` | 免 | 模型发现：默认吐双出口全量 + `cn:`/`global:` 别名条目；带 `X-Realm: intl/cn` 则只列该出口 |
 | `GET /credits` | 免 | 各账号积分/余额 |
 | `POST /v1/chat/completions` | key* | stream / 非 stream |
 | `POST /v1/responses` | key* | Responses API（Codex / Claude Code） |
@@ -38,6 +38,22 @@ python3 -m gateway.server --tasks               # 打开签到/猫猫旅行后�
 export OPENAI_API_BASE=http://127.0.0.1:8788/v1
 export OPENAI_API_KEY=***
 ```
+
+## 选出口（intl / cn）
+
+优先级从高到低：
+
+1. **模型名前缀**（只认冒号）：`cn:hy3` 强制国内版出口，`global:hy3` 强制国际版
+   （`intl:` 同义）。上游只收到裸名，响应与 `usage.jsonl` 回显你请求的带前缀名。
+   前缀 + 模型专属出口冲突会 400，不会偷偷换家。
+2. **`X-Realm: cn|intl` 头或 `?realm=`**：同上，逐请求钉死。
+3. **自动路由（啥都不写）**：
+   - 单出口模型自己找家：`glm-5.3-flash`、`minimax-*`、`kimi-k3-1` 等 -> cn；
+     `gpt-*`、`gemini-*` 等 -> intl。全局 realm 不影响它们。
+   - 双出口模型（`hy3`、`deepseek-v4.1-flash`、`glm-5.3`…）-> 跟随全局 realm。
+4. **全局默认 realm**：`wbctl realm cn` 或 `POST /realm`，落盘持久化。
+
+`/v1/models` 的 `exitRealm` 字段标出每个条目属于哪个出口。
 
 ## 国内版羊毛（默认关闭）
 
@@ -69,6 +85,8 @@ tests/            # python3 -m unittest discover -s tests
 桌面凭据扫描（%LOCALAPPDATA%）、.bat/.command、LAN 启动脚本、Docker、
 用量看板统计（analytics/perf/by-account）、日志查看器、账号导出/导入看板流。
 改动：open_upstream 的 POOL/log 参数化；?key= 移除；CORS 默认关；
+出口指定从旧网关的模型名前缀改为 header/全局 realm 优先，同时兼容 `cn:`/`global:` 前缀；
+`/v1/models` 默认返回双出口全量（hub 是按当前 realm 单列表）。
 auth 从「面板或 key」简化为「可选单 key」；token 文件权限 0600/0700。
 
 ## 风险备忘

@@ -284,6 +284,21 @@ class RealmRouting(unittest.TestCase):
         self.assertEqual(tr.exclusive_realm("glm-5.3"), "")  # served by both
 
 
+class RealmPrefix(unittest.TestCase):
+    def test_parse(self):
+        self.assertEqual(tr.split_realm_prefix("cn:hy3"), ("hy3", "cn"))
+        self.assertEqual(tr.split_realm_prefix("global:hy3"), ("hy3", "intl"))
+        self.assertEqual(tr.split_realm_prefix("intl:hy3"), ("hy3", "intl"))
+        self.assertEqual(tr.split_realm_prefix("CN:hy3"), ("hy3", "cn"))
+        self.assertEqual(tr.split_realm_prefix(" cn:hy3 ".strip()), ("hy3", "cn"))
+
+    def test_pass_through(self):
+        for m in ("hy3", "", None, "weird:model:x", "cn:", "cnbuddy:hy3"):
+            mid, realm = tr.split_realm_prefix(m)
+            self.assertIsNone(realm, m)
+            self.assertEqual(mid, str(m or ""))
+
+
 class ResponsesTranslation(unittest.TestCase):
     def test_input_items_to_messages(self):
         payload = {"model": "m", "instructions": "sys", "input": [

@@ -75,6 +75,26 @@ def exclusive_realm(model_id):
     return ""
 
 
+# ---- Per-request exit encoded in the model name ----
+# Old-hub muscle memory: "cn:hy3" forces the cn exit, "global:hy3" (or the
+# internal spelling "intl:") forces intl. Colon separator only. A head that
+# is not a known realm word passes through untouched, so odd model names
+# containing colons are never mangled.
+REALM_PREFIXES = {"cn": "cn", "global": "intl", "intl": "intl"}
+
+
+def split_realm_prefix(model_id):
+    """Return (bare_model_id, realm_or_None) for a name like "cn:hy3"."""
+    m = str(model_id or "")
+    head, sep, tail = m.partition(":")
+    if sep and tail:
+        realm = REALM_PREFIXES.get(head.strip().lower())
+        bare = tail.strip()
+        if realm and bare:
+            return bare, realm
+    return m, None
+
+
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 
 
