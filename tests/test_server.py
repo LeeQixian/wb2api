@@ -94,6 +94,7 @@ class ServerCase(unittest.TestCase):
         srv.POOL = FakePool()
         # Default: auth off, no realm guard, open_upstream -> fake SSE.
         self.calls = []
+        self.realms = []
         self.open_result = ("ok", None)
         self._saved = {k: getattr(srv, k) for k in ("ARGS",)}
         srv.ARGS = srv._parse_args([])
@@ -155,6 +156,7 @@ class ServerCase(unittest.TestCase):
 
     def _fake_open(self, pool, payload, session_key=None, target_realm=None, log=None):
         self.calls.append(payload)
+        self.realms.append(target_realm)
         kind, err = self.open_result
         if err is not None:
             raise err
@@ -294,8 +296,22 @@ class TestAuth(ServerCase):
         self.assertEqual(r2.status, 200)
         self.assertTrue(info["ok"])
 
-
 class TestRealmGuards(ServerCase):
+    def test_cn_only_model_auto_routes_without_header(self):
+        # regression: glm-5.3-flash on a global-intl gateway used to 400
+        # because the global realm masked the per-model auto-routing
+        self._patch_upstream("exclusive_realm", lambda m: "cn" if m == "glm-5.3-flash" else "")
+        status, _ = self._post_chat(body={"model": "glm-5.3-flash", "messages":
+                                          [{"role": "user", "content": "hi"}]})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.realms, [None])   # deferred to model detection
+
+    def test_cn_only_model_ok_with_cn_header(self):
+        self._patch_upstream("exclusive_realm", lambda m: "cn")
+        status, _ = self._post_chat(headers={"X-Realm": "cn"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.realms, ["cn"])
+
     def test_cross_realm_400_without_upstream(self):
         self._patch_upstream("exclusive_realm", lambda m: "cn")
         status, raw = self._post_chat(headers={"X-Realm": "intl"})

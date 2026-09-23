@@ -385,8 +385,14 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
     def _realm_guard(self, model):
-        """Return an error string for realm/banned mismatches, '' when fine."""
-        req_realm = self._request_realm() or upstream.get_realm()
+        """Return an error string for realm/banned mismatches, '' when fine.
+
+        Only an *explicit* per-request realm (X-Realm header / ?realm=) can
+        conflict with a model's exclusive exit. Without one the request
+        auto-routes: exclusive models pick their own exit, dual-exit models
+        follow the global realm.
+        """
+        req_realm = self._request_realm()
         owner = upstream.exclusive_realm(model or "")
         if req_realm in ("intl", "cn") and owner and owner != req_realm:
             served = "国内版" if owner == "cn" else "国际版"
@@ -561,9 +567,12 @@ class Handler(BaseHTTPRequestHandler):
                                              request_meta, fp, account, t_start, ns_map)
 
     def open_upstream(self, payload, session_key):
-        req_realm = self._request_realm() or upstream.get_realm()
+        # None when the caller did not pin a realm: upstream then routes by
+        # model (exclusive models to their own exit, shared ones to the
+        # global realm).
         return upstream.open_upstream(POOL, payload, session_key=session_key,
-                                      target_realm=req_realm, log=log)
+                                      target_realm=self._request_realm(),
+                                      log=log)
 
     def _upstream_error(self, model, exc, t_start, fp):
         wall = int((time.time() - t_start) * 1000)
