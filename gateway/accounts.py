@@ -298,7 +298,7 @@ class Account(object):
         if self.path and os.path.exists(self.path):
             os.remove(self.path)
 
-    def ready(self, model=None):
+    def ready(self, model=None, allow_refresh=True):
         if not self.enabled or not self.access_token:
             return False
         if self.cooldown_until > time.time():
@@ -314,7 +314,11 @@ class Account(object):
         # Refresh is a last resort and its result decides availability.
         # Returning True unconditionally here kept handing out an account
         # whose token was about to expire, so requests went upstream with a
-        # stale credential and came back 401/403.
+        # stale credential and came back 401/403. Read-only callers (health,
+        # list, credits) pass allow_refresh=False: a 30s-timeout network call
+        # must never hide behind a status probe.
+        if not allow_refresh:
+            return False
         return self.refresh()
 
     def headers(self, purpose="chat"):
@@ -484,8 +488,10 @@ class Account(object):
         url = cfg["billing_upstream"] + GET_RESOURCE_PATH
         headers = self.headers(purpose="billing")
         try:
+            # one short attempt: /credits fans this out per account on a free
+            # route; retries=3 x 30s would hold handler threads for minutes
             res = http_json(url, data=json.dumps(body).encode(), method="POST", headers=headers,
-                            timeout=30, proxy=self.proxy)
+                            timeout=10, retries=1, proxy=self.proxy)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
         data = res.get("data", {}).get("Response", {}).get("Data", {})
@@ -668,21 +674,51 @@ class AccountPool(object):
         self.loaded_at = 0.0
 
     def load(self):
+        """Rescan accounts/ while keeping in-memory Account objects alive.
+
+        Replacing a live Account would swap its _refresh_lock/_save_lock for
+        new ones: a hot reload landing mid-refresh lets the old and new
+        objects refresh concurrently, each blind to the other's locks — and
+        because the upstream rotates the refresh token, a stale writer can
+        persist a now-dead token and brick the account. So for uids we
+        already hold, only credential/display fields are refreshed in place;
+        runtime state (locks, model cooldowns, product, last_error) survives.
+        """
+        fresh = {}
+        if os.path.isdir(self.dir):
+            for name in sorted(os.listdir(self.dir)):
+                if not name.endswith(".json"):
+                    continue
+                path = os.path.join(self.dir, name)
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        account = Account(json.load(fh), path)
+                except Exception as exc:
+                    self.log("account %s unreadable: %s" % (name, exc))
+                    continue
+                if account.uid:
+                    fresh[account.uid] = account
         with self._lock:
-            self.accounts = []
-            if os.path.isdir(self.dir):
-                for name in sorted(os.listdir(self.dir)):
-                    if not name.endswith(".json"):
-                        continue
-                    path = os.path.join(self.dir, name)
-                    try:
-                        with open(path, encoding="utf-8") as fh:
-                            account = Account(json.load(fh), path)
-                    except Exception as exc:
-                        self.log("account %s unreadable: %s" % (name, exc))
-                        continue
-                    if account.uid:
-                        self.accounts.append(account)
+            old = {a.uid: a for a in self.accounts}
+            merged = []
+            for uid, new in fresh.items():
+                kept = old.get(uid)
+                if kept is None:
+                    merged.append(new)
+                    continue
+                for field in ("enabled", "nickname", "domain", "realm",
+                              "enterprise_id", "proxy", "credits",
+                              "last_checkin", "path"):
+                    setattr(kept, field, getattr(new, field))
+                # Token fields: never roll a fresher in-memory credential
+                # back to an older file (a refresh whose save() raced the
+                # rescan must not be undone by the stale copy on disk).
+                if (new.expires_at or 0) >= (kept.expires_at or 0):
+                    kept.access_token = new.access_token
+                    kept.refresh_token = new.refresh_token or kept.refresh_token
+                    kept.expires_at = new.expires_at
+                merged.append(kept)
+            self.accounts = merged
             self.loaded_at = time.time()
             return self.accounts
 
@@ -772,9 +808,13 @@ class AccountPool(object):
                 account.save(self.dir)
 
     def count_ready(self, realm=None, model=None):
+        """Pure probe: never triggers a network refresh (health/list/loop
+        budget all call this; only pick()/pick_for_session may refresh)."""
         with self._lock:
             snapshot = [a for a in self.accounts if not realm or a.realm == realm]
-        return sum(1 for a in snapshot if a.enabled and a.access_token and a.ready(model=model))
+        return sum(1 for a in snapshot
+                   if a.enabled and a.access_token
+                   and a.ready(model=model, allow_refresh=False))
 
     def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None):
         exclude = exclude or set()

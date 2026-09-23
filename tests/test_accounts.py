@@ -238,6 +238,44 @@ class PoolTests(unittest.TestCase):
         self.assertEqual([a.uid for a in pool2.accounts], ["good"])
         self.assertTrue(any("unreadable" in m for m in msgs))
 
+    def test_count_ready_never_refreshes(self):
+        # regression: /health -> count_ready used to fire a 30s-timeout
+        # network refresh on any near-expiry token, hanging the probe
+        soon = make_jwt(uid="stale", exp=int(time.time()) + 60)
+        a = self.pool.import_token(soon, refresh_token="rt")
+        calls = []
+        with mock.patch.object(Account, "refresh",
+                               lambda self: calls.append(1) or True):
+            self.assertEqual(self.pool.count_ready(), 0)   # probe: no refresh
+            self.assertEqual(calls, [])
+            picked = self.pool.pick(realm="intl")          # serving: may refresh
+            self.assertIs(picked, a)
+            self.assertEqual(len(calls), 1)
+
+    def test_load_preserves_live_objects_across_hot_reload(self):
+        # regression: load() rebuilt Account objects, swapping _refresh_lock/
+        # _save_lock under an in-flight refresh; the losing writer could then
+        # persist a dead rotated refresh token and brick the account.
+        a = self.pool.import_token(make_jwt(uid="keep", exp=1893456000))
+        a.model_cooldowns["hy3"] = time.time() + 300   # runtime state to keep
+        # simulate a refresh that rotated tokens in memory ahead of the file
+        a.access_token = make_jwt(uid="keep", exp=2000000000)
+        a.refresh_token = "rotated-rt"
+        a.expires_at = 2000000000
+        self.pool.load()
+        kept = self.pool.get("keep")
+        self.assertIs(kept, a)                              # same object, same locks
+        self.assertIs(kept._refresh_lock, a._refresh_lock)
+        self.assertEqual(kept.refresh_token, "rotated-rt")  # no rollback to file
+        self.assertIn("hy3", kept.model_cooldowns)          # cooldown survived
+        # and a genuinely newer file is still absorbed
+        kept.access_token = "old"
+        kept.save(self.tmp.name)
+        another = AccountPool(self.tmp.name)
+        another.load()
+        self.assertEqual(another.get("keep").access_token,
+                         a.access_token)
+
 
 class OAuthPollTests(unittest.TestCase):
     def test_poll_login_success_adds_account(self):
