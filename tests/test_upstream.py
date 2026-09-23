@@ -276,18 +276,20 @@ class ModelsAllTests(unittest.TestCase):
             up.fetch_models = real
             up.set_realm("intl")
         ids = [m for m, _ in out]
-        # dual-exit model: bare + both aliases, exclusive models: bare only
+        # dual-exit model: bare + both aliases; exclusive models: bare ONLY
+        # (the bare id of an exclusive model already pins its exit)
         self.assertIn("hy3", ids)
         self.assertIn("cn:hy3", ids)
         self.assertIn("global:hy3", ids)
         self.assertIn("gpt-5.5", ids)
         self.assertIn("glm-5.3-flash", ids)
-        self.assertNotIn("cn:gpt-5.5", ids)
-        self.assertNotIn("global:glm-5.3-flash", ids)
-        # no duplicates
+        for dup in ("cn:gpt-5.5", "global:gpt-5.5",
+                    "cn:glm-5.3-flash", "global:glm-5.3-flash"):
+            self.assertNotIn(dup, ids)
+        # no duplicates, and the bare dual entry belongs to the CURRENT realm
         self.assertEqual(len(ids), len(set(ids)))
-        meta = dict(out)["cn:hy3"]
-        self.assertEqual(meta.get("exitRealm"), "cn")
+        self.assertEqual(dict(out)["hy3"].get("exitRealm"), "intl")
+        self.assertEqual(dict(out)["cn:hy3"].get("exitRealm"), "cn")
 
 
 if __name__ == "__main__":

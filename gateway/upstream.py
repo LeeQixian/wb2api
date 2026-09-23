@@ -240,30 +240,34 @@ def fetch_models(realm=None, pool=None):
 def fetch_models_all(pool=None):
     """Full menu across BOTH exits, independent of the global realm.
 
-    Every entry appears under its bare id (auto-routing decides the exit)
-    and under "global:<id>" / "cn:<id>" (forces that exit; the server-side
-    counterpart is translate.split_realm_prefix). Current-realm entries
-    come first so the list order still reflects what the gateway defaults
-    to. Each entry's meta gains an "exitRealm" marker for clients that
-    want to render the split.
+    A model appears exactly once under its bare id. Only models served by
+    BOTH exits additionally get "cn:<id>" / "global:<id>" aliases — for an
+    exclusive model the bare id already pins the exit, and listing a second
+    name for it is duplicate-menu noise. Current-realm entries come first
+    so the order still reflects the gateway default. Each entry's meta
+    carries "exitRealm" (bare dual-exit entries: the current realm).
     """
+    catalogs = {realm: dict(fetch_models(realm=realm, pool=pool))
+                for realm in ("intl", "cn")}
+    dual = set(catalogs["intl"]) & set(catalogs["cn"])
     out, seen = [], set()
-    catalogs = {}
-    for realm in ("intl", "cn"):
-        catalogs[realm] = fetch_models(realm=realm, pool=pool)
     current = get_realm()
     if current not in ("intl", "cn"):
         current = "intl"
     for realm in (current, "cn" if current == "intl" else "intl"):
-        prefix = "global:" if realm == "intl" else "cn:"
-        for mid, meta in catalogs[realm]:
-            for disp in (mid, prefix + mid):
-                if disp in seen:
-                    continue
-                seen.add(disp)
-                m = dict(meta or {})
-                m["exitRealm"] = realm
-                out.append((disp, m))
+        for mid, meta in catalogs[realm].items():
+            if mid in seen:
+                continue
+            seen.add(mid)
+            m = dict(meta or {})
+            m["exitRealm"] = realm
+            out.append((mid, m))
+            if mid in dual:
+                for alt_realm in ("intl", "cn"):
+                    alt = dict(catalogs[alt_realm][mid] or {})
+                    alt["exitRealm"] = alt_realm
+                    out.append((("global:" if alt_realm == "intl" else "cn:") + mid,
+                                alt))
     return out
 
 
