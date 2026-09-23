@@ -153,6 +153,34 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(len(self.pool.accounts), 1)
         self.assertEqual(a2.nickname, "n2")
 
+    def test_import_credential_real_world_shape(self):
+        # literal structure of the old-proxy export the owner actually has:
+        # account{uid,enterpriseId,nickname} + auth{accessToken,refreshToken,
+        # expiresAt,domain,realm}
+        from gateway.accounts import credential_to_kwargs
+        token = make_jwt(uid="real-uid", exp=1899000000,
+                         iss="https://www.workbuddy.ai")  # iss lies; realm field wins
+        blob = {"account": {"uid": "real-uid", "enterpriseId": "ent-7",
+                            "nickname": "\u67d0\u67d0"},
+                "auth": {"accessToken": token, "refreshToken": "rt-x",
+                         "expiresAt": 1794571580,
+                         "domain": "www.codebuddy.cn", "realm": "cn"}}
+        kw = credential_to_kwargs(blob)
+        self.assertEqual(kw["uid"], "real-uid")
+        self.assertEqual(kw["nickname"], "\u67d0\u67d0")
+        self.assertEqual(kw["enterpriseId"], "ent-7")
+        self.assertEqual(kw["realm"], "cn")           # from the explicit field
+        self.assertEqual(kw["domain"], "www.codebuddy.cn")
+        self.assertEqual(kw["expiresAt"], 1794571580)  # file value, not jwt exp
+        self.assertEqual(kw["refreshToken"], "rt-x")
+        # CLI --realm still overrides the file field
+        self.assertEqual(credential_to_kwargs(blob, realm="intl")["realm"], "intl")
+        a = self.pool.import_credential(json.dumps(blob))
+        acct = AccountPool(self.tmp.name)
+        acct.load()
+        self.assertEqual(acct.get("real-uid").enterprise_id, "ent-7")
+        self.assertEqual(acct.get("real-uid").domain, "www.codebuddy.cn")
+
     def test_import_credential_all_shapes(self):
         from gateway.accounts import credential_to_kwargs
         token = make_jwt(uid="u-nested", exp=1893456000,

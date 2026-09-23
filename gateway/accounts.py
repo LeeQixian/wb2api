@@ -635,7 +635,10 @@ def credential_to_kwargs(blob, realm=None):
     enterprise = str(blob.get("enterpriseId") or blob.get("enterpriseID")
                      or prof.get("enterpriseId") or prof.get("enterpriseID") or "")
     domain = str(blob.get("domain") or auth.get("domain") or "")
-    detected = realm or detect_realm_from_token(token, domain)
+    # an explicit realm field (older proxies store one) wins over inference
+    declared = str(blob.get("realm") or auth.get("realm") or "").strip().lower()
+    detected = realm or (declared if declared in ("intl", "cn") else None) \
+        or detect_realm_from_token(token, domain)
     cfg = get_realm_config(detected)
     return {
         "uid": uid,
