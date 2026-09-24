@@ -192,20 +192,27 @@ def merge_catalog(primary, realm=None):
     return out
 
 
-def fetch_endpoint_models(pool=None):
-    account = pool.pick(realm="intl") if pool else None
+def fetch_endpoint_models(pool=None, realm="intl"):
+    """Live menu, fetched from the SAME host the chat requests go to.
+
+    The endpoint used to be hardwired to workbuddy.ai, which answers cn
+    tokens too (and hands back the intl menu) — the cn realm then listed
+    models the domestic servers do not actually serve. Pick a ready
+    account of the requested realm instead and use its chat_base_url().
+    """
+    account = pool.pick(realm=realm) if pool else None
     if account is None:
-        log("model discovery skipped: no usable account")
-        cached = tr._models_cache.get("intl", {}).get("data")
+        log("model discovery skipped: no usable %s account" % realm)
+        cached = tr._models_cache.get(realm, {}).get("data")
         return [m for m, _ in (cached or [])]
-    req = urllib.request.Request(UPSTREAM + MODELS_PATH, method="GET",
-                                 headers=account.headers())
+    req = urllib.request.Request(account.chat_base_url() + MODELS_PATH,
+                                 method="GET", headers=account.headers())
     try:
         with wb_accounts.urlopen(req, timeout=30, proxy=account.proxy) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
-        log("model discovery failed: %s" % exc)
-        cached = tr._models_cache.get("intl", {}).get("data")
+        log("model discovery failed (%s): %s" % (realm, exc))
+        cached = tr._models_cache.get(realm, {}).get("data")
         return [m for m, _ in (cached or [])]
     ids, seen = [], set()
     data = payload.get("data") or {}
@@ -229,8 +236,8 @@ def fetch_models(realm=None, pool=None):
         if c["data"] and time.time() - c["at"] < 300:
             return c["data"]
     live = []
-    if r in ("intl", "all"):
-        live = [(m, {}) for m in fetch_endpoint_models(pool=pool)]
+    if r in ("intl", "cn"):
+        live = [(m, {}) for m in fetch_endpoint_models(pool=pool, realm=r)]
     entries = merge_catalog(live, realm=r)
     with _lock:
         tr._models_cache[r] = {"at": time.time(), "data": entries}
