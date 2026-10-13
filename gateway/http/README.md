@@ -1,45 +1,42 @@
 # http
 
-HTTP layer: the request handler, its state, and the routes.
+The HTTP layer: the request handler, its routes, and the runtime state.
 
 ## Design
 
-`gateway/server.py` is the entry point (`python3 -m gateway.server`). It is a
-thin facade over this package and forwards state writes (`POOL`, `ARGS`,
-`ACCOUNTS_DIR`, `USAGE_DIR`, ...) onto `http/state.py`.
-
-- `state.py` - shared runtime state plus `refresh_pool()`.
+- `state.py` - runtime state (the active pool, args, dirs, chat slots) and
+  `refresh_pool()`.
 - `handler.py` - `Handler`, assembled from the mixins below.
 - `base.py` - request parsing, auth, CORS, error envelopes.
 - `routes/get.py` - `GET /health`, `GET /realm`, `GET /v1/models`, `GET /credits`.
 - `routes/post.py` - `POST /realm`, `POST /v1/chat/completions`, `POST /v1/responses`.
-- `runner.py` - `GatewayServer` (backlog) and `build_server`.
+- `runner.py` - `GatewayServer` and `build_server`.
 - `usage.py` - `usage.jsonl` row writing.
 - `errors.py` - `BodyTooLarge`, `BadJSON`.
 
-`gateway/main.py` parses arguments, wires the pool/settings and starts the
-server; `gateway/common/log.py` is the shared log sink.
+`gateway/server.py` is the entry point (`python3 -m gateway.server`); it starts
+the server and exposes the module-level state. `gateway/main.py` parses
+arguments and wires everything up. `gateway/common/log.py` is the shared sink.
 
-## What each piece fixes
+## Invariants
 
-- **Auth surface.** The key is read only from the `Authorization` / `x-api-key`
-  / `api-key` headers. The `?key=` spelling is gone because it leaks the key
-  into browser history and Referer. Binds `127.0.0.1` by default; CORS stays
-  off unless `--cors`.
-- **Nagle / backlog.** `disable_nagle_algorithm` plus `request_queue_size = 128`
-  stop small JSON replies from paying a delayed-ACK penalty and stop SYN drops
-  under bursts.
-- **Body cap.** A 16MB payload cap (`WB_MAX_PAYLOAD_BYTES`) bounds memory; the
-  body is read whole before parsing.
-- **Chat slots.** A bounded semaphore caps concurrent chats
-  (`WB_MAX_CONCURRENT_CHAT`), with `WB_CHAT_SLOT_WAIT` for the wait.
+- **The API key is read only from headers** (`Authorization` / `x-api-key` /
+  `api-key`). There is no `?key=` query form, so a key can never leak into
+  browser history or a Referer. Binds `127.0.0.1` by default; CORS is off
+  unless `--cors` is passed.
+- **A response is flushed with `disable_nagle_algorithm`** and the listen
+  backlog is raised, so small JSON replies do not pay a delayed-ACK penalty
+  and bursts are not dropped.
+- **The request body is capped** (`WB_MAX_PAYLOAD_BYTES`, default 16MB) and
+  read whole before parsing.
+- **Concurrent chats are bounded** by a semaphore (`WB_MAX_CONCURRENT_CHAT`).
 
 ## Unresolved
 
-- Route registration is a hand-written dispatch in `routes/*`; there is no
-  route table, so adding a route means editing both `do_GET`/`do_POST`.
+- Routing is a hand-written dispatch in `routes/*`; adding a route means
+  editing `do_GET` / `do_POST`.
 
-## Config fields
+## Config
 
 - `--host`, `--port`, `--api-key`, `--realm`, `--tasks`, `--cors`,
   `--accounts-dir`, `--usage-dir`.

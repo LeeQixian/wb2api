@@ -1,9 +1,9 @@
 # cli
 
-Command-line management, replacing the upstream dashboard.
+Command-line management for accounts, keys and settings.
 
-`python3 -m gateway.wbctl` (facade in `gateway/wbctl.py`) dispatches to
-`cli/wbctl.py`.
+`python3 -m gateway.wbctl` is the entry point; it dispatches to the command
+implementations in this package.
 
 Commands: `login`, `import`, `list`, `remove`, `enable`, `disable`, `refresh`,
 `credits`, `checkin`, `daily-chat`, `growthplan`, `realm`, `product`,

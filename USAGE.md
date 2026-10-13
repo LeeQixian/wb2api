@@ -54,7 +54,7 @@ python3 -m gateway.wbctl list
 输出长这样，一行一个账号：
 
 ```
-7f3a9c21-4e5b-4d8a-9c11  intl  小明   on   ready=y   exp=2 days      credits=512.3
+7f3a9c21-4e5b-4d8a-9c11-000000000001  intl  小明   on   ready=y   exp=2 days      credits=512.3
 ```
 
 | 字段 | 意思 |

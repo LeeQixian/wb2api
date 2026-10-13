@@ -1,48 +1,48 @@
 # tasks
 
-The credit-earning task engine (off by default).
+The credit-earning task engine.
 
 ## Design
 
-Two entry points, one shared surface:
+Two entry points share one surface:
 
-- **Daily tasks** run from the background scheduler (`--tasks`) for every
-  account that can execute them, regardless of `enabled`: enable/disable only
-  controls whether an account serves inference and spends credits, not whether
-  it is kept alive.
-- **Growth tasks** are one-shot and are NOT run by the scheduler. They run only
-  through `wbctl growthplan <uid>`.
+- **Daily tasks** run from the background scheduler (`--tasks`): token
+  keep-alive, CN check-in, cat travel and the intl daily activity chat.
+- **Growth tasks** are one-shot (accept, light up, claim) and run only through
+  `wbctl growthplan <uid>`; the scheduler never touches them.
 
-- `base.py` - task specs, ids, the desktop-only list, `_pause`.
+- `base.py` - task specs and ids, the desktop-only list, pacing.
 - `growth.py` - fetch / accept / claim / report; `run_growth_tasks`,
   `run_night_growth`.
-- `travel.py` - cat travel status / depart, and the missing-Buddy self-heal.
-- `scheduler.py` - the background loop (see its module docstring).
+- `travel.py` - cat travel status and departure, plus the missing-Buddy
+  self-heal.
+- `scheduler.py` - the background loop.
 
-`gateway/scheduler.py` is a facade over `tasks/scheduler.py`.
+`gateway/scheduler.py` at the top level is the import surface for the
+scheduler.
 
-## What each piece fixes
+## Invariants
 
-- **Prerequisite chain.** `first_buddy` is an auto task whose reward is the
-  Buddy instance, and it gates the single tasks and travel; it is completed and
-  claimed first.
-- **Accept reporting.** `accept_tasks` returns accepted/failed lists rather
-  than a bare bool, because a silently failed accept makes every later report
-  land on an unaccepted task and progress stays at zero.
-- **Anti-risk-control timing.** Randomized pacing (2-7s within an account,
-  3-10s between accounts) and per-day schedule offsets keep the timing off a
-  machine beat. Do not replace them with constants.
-- **Enterprise skip.** Enterprise accounts have no growth system; tasks are
-  skipped silently to avoid a 403.
-- **Cat travel self-heal.** Travel checks for the Buddy and completes
-  `first_buddy` itself when the instance is missing.
+- **`enable` / `disable` gates inference only.** The scheduler keeps every
+  runnable account alive (keep-alive, check-in, travel) regardless of its
+  enabled state; enable controls whether an account serves requests and spends
+  credits, not whether it is maintained.
+- **`first_buddy` runs first.** Its reward is the Buddy instance, and it gates
+  the single tasks and travel, so it is completed and claimed before the rest.
+- **`accept_tasks` reports accepted/failed per task**, not a bare success. A
+  silently failed accept makes every later report land on an unaccepted task
+  and progress stays at zero.
+- **Pacing is randomized.** 2-7s between actions within an account and 3-10s
+  between accounts; the schedule offsets move by minutes, not hours. A fixed
+  cadence is itself a signature.
+- **Enterprise accounts are skipped silently** (no personal growth system).
 
 ## Unresolved
 
-- `run_growth_tasks` and `run_night_growth` share task-spec knowledge with
-  `base.py`; a spec change must be reflected in both paths.
+- `run_growth_tasks` and `run_night_growth` both encode task-spec knowledge
+  from `base.py`; a spec change must be reflected in both.
 
-## Config fields
+## Config
 
 - `--tasks` enables the scheduler.
 - `daily_chat_web` selects the intl daily-activity channel.

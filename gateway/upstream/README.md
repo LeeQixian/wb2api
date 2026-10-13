@@ -1,49 +1,47 @@
 # upstream
 
-Outbound requests to the WorkBuddy upstream.
+Outbound requests to the WorkBuddy upstream: the retry/rotation loop, the
+connection pool, the live model catalogue and the dispatch guards.
 
 ## Design
 
-`gateway/upstream/__init__.py` is the facade (`gateway.upstream.X`). It also
-forwards writes of `_POOL` / `USAGE_DIR` / `ACCOUNTS_DIR` / `_lock` onto
-`upstream/state.py`, and forwards `wb_accounts` / catalog-function patches onto
-the modules that use them, so tests patching the facade still take effect.
-
-- `state.py` - shared mutable state injected by `server.main()`.
-- `client.py` - `open_upstream()`: the retry / rotation loop.
-- `pool.py` - keep-alive connection pool (see its module docstring).
-- `catalog.py` - live `/v3/config` catalogue fetch, merge and curation.
-- `realm.py` - global exit state (read, switch, persist).
-- `retry.py` - 429/403/5xx classification and identity rotation.
-- `guards.py` - daily token guard and usage-log folding.
-- `timeouts.py` - socket header / idle timeouts.
+- `client.py` - `open_upstream()`: pick an account, send the request, and run
+  the retry/rotation loop on failure.
+- `pool.py` - a keep-alive connection pool that reuses `http.client`
+  connections (urllib hardcodes `Connection: close`, so every request would
+  otherwise pay a fresh TCP+TLS handshake).
+- `catalog.py` - fetch the live `/v3/config` catalogue, merge it over the
+  bundled snapshot, and curate the advertised model list.
+- `realm.py` - the active exit (intl/cn): read, switch and persist.
+- `retry.py` - classify a failure (429 / 403 / 5xx) and decide the response.
+- `guards.py` - the daily token guard and the usage-log folding.
+- `timeouts.py` - socket header and stream-idle timeouts.
 - `errors.py` - `ContentRejected`, `RateLimited`.
+- `state.py` - shared runtime state (the active pool, usage dir, coarse lock).
 
-## What each piece fixes
+`gateway/upstream/` is its own import surface (`gateway.upstream.X`); writes to
+the shared state go through to `upstream/state.py`.
 
-- **429 classification.** A cn-region 429 body states its reset in Chinese, so
-  the reset time is parsed from both spellings; without it every cn 429
-  degraded to an account-level cooldown. Account-level scope needs positive
-  wording (a word boundary avoids matching identifiers like `accountId`), and
-  an unscoped soft limit takes a separate short ladder (60s -> 600s).
-- **403 risk control (code 11140).** "Account restricted due to unusual
-  activity" is an account problem, not content review: the account cools 2h and
-  the next one takes over. Content-review 403 still passes straight through,
-  which is this project's contract.
-- **>=500 rotates.** Any 5xx (including custom codes like 550) rotates instead
-  of failing the request.
-- **Connection reuse.** urllib's `do_open` hardcodes `Connection: close`, so
-  every request pays a fresh TCP+TLS handshake. `pool.py` reuses `http.client`
-  connections; toggle with `WB_UPSTREAM_KEEPALIVE=0`.
-- **Timeouts.** A header timeout (first byte) plus a stream idle timeout stop a
-  stuck stream from holding a concurrency slot for 10 minutes.
+## Invariants
+
+- **A 429 names its reset in both English and Chinese**, so both spellings are
+  parsed; an unscoped soft limit takes a separate short ladder (60s -> 600s),
+  not the account-level one.
+- **403 code 11140 is account risk control, not content review.** The account
+  cools for 2h and the next one takes over. A content-review 403 passes
+  straight through to the client.
+- **Any status >= 500 rotates** to another account (custom codes included).
+- **Retries only cover failures before any response byte arrives** on a reused
+  connection; a request the peer may have processed is never retried.
+- **A stuck stream does not hold a slot forever**: a first-byte timeout and a
+  stream-idle timeout both apply.
 
 ## Unresolved
 
-- The identity auto-switch rotates `workbuddy -> vscode -> cli -> ...`; there
-  is no per-identity health tracking beyond the round counter.
+- The identity auto-switch rotates in a fixed order with no per-identity
+  health tracking beyond the round counter.
 
-## Config fields
+## Config
 
 - `upstream.header_timeout_seconds`, `upstream.idle_timeout_seconds`.
 - `daily_token_limit`, `auto_switch_product` (see `account/README.md`).

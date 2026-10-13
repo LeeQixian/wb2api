@@ -1,29 +1,31 @@
 # config
 
-Configuration and identity.
+Configuration, outbound identity and request fingerprints.
 
 ## Design
 
-`gateway/settings.py`, `gateway/prompt.py`, `gateway/identity.py` and
-`gateway/fingerprint.py` are small import facades over this package (kept so
-existing imports and tests keep working).
-
-- `settings.py` - reads/writes `accounts/settings.json`: the API key and the
-  guard switches. Every switch has a conservative default.
-- `prompt.py` - the gateway system-prompt modes (see `protocol/README.md`).
-- `identity.py` - the three outbound identities (desktop / vscode / cli) with
-  their endpoints, headers and user-agents.
+- `settings.py` - reads and writes `accounts/settings.json`: the API key and
+  the guard switches. Every switch has a conservative default, so an untouched
+  file keeps the gateway at its documented behaviour.
+- `prompt.py` - the gateway system-prompt modes (passthrough / custom /
+  append); see `protocol/README.md` for how they are applied.
+- `identity.py` - the three outbound identities (desktop / vscode / cli), each
+  with its endpoints, headers and user-agents.
 - `fingerprint.py` - deterministic id derivation and desktop fingerprints.
 
-## What each piece fixes
+`gateway/settings.py`, `gateway/prompt.py`, `gateway/identity.py` and
+`gateway/fingerprint.py` at the top level are the import surface for this
+package.
 
-- **Three outbound identities.** The upstream rate-limits per identity, so a
-  denied identity can rotate to another; the chosen identity is persisted per
-  account and survives a restart.
-- **Switches default off.** An untouched settings file keeps the gateway at its
-  documented behaviour.
+## Invariants
 
-## Config fields
+- **The upstream rate-limits per identity.** The three identities are three
+  separate quota lines, so a denied one can rotate to another. The identity
+  chosen for an account is persisted and survives a restart.
+- **Switches default to their safe value.** Nothing is enabled by writing an
+  empty settings file.
+
+## Config
 
 `accounts/settings.json`:
 
