@@ -1,0 +1,319 @@
+"""Tool-call pairing repair and reasoning backfill."""
+
+
+import json
+from gateway.common.log import log
+
+
+def _empty_content(value):
+    """True when an assistant message carries no content at all.
+
+    None / "" / [] all mean "no content": clients disagree on which empty
+    shape they emit, and a batch split into adjacent assistant messages must
+    merge for either shape (a missed [] was the original 11148 case).
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value == ""
+    if isinstance(value, list):
+        return len(value) == 0
+    return False
+
+
+def _merge_reasoning_content(dst, src):
+    """Fold src's reasoning_content into dst, newline-joined when both exist."""
+    rc = src.get("reasoning_content")
+    if not isinstance(rc, str) or not rc:
+        return
+    prev = dst.get("reasoning_content")
+    if isinstance(prev, str) and prev:
+        dst["reasoning_content"] = prev + "\n" + rc
+    else:
+        dst["reasoning_content"] = rc
+
+
+def merge_adjacent_tool_calls(messages):
+    """Merge back-to-back assistant tool_calls messages into one.
+
+    Some OpenAI-compatible agent clients replay a parallel batch as several
+    adjacent assistant messages, each carrying one tool_call. DeepSeek-family
+    upstreams answer 400 / code 11148 (tool_call_sequence_broken) for that
+    shape and retire the conversation, because every retry replays the same
+    history and switching accounts cannot help. Merging the declarations
+    restores the shape the upstream accepts.
+
+    Conditions are strict, so no semantics are invented:
+      - the messages must be adjacent;
+      - the trailing message must have empty content (None/""/[]);
+      - the leading message must already be an assistant with tool_calls.
+
+    A second form folds a plain assistant's string content into a preceding
+    tool_calls assistant that has no content of its own (the same split batch
+    replayed in the other order). reasoning_content is preserved either way,
+    because DeepSeek multi-turn thinking requires it back.
+    """
+    if not isinstance(messages, list) or len(messages) < 2:
+        return messages, False
+    out = []
+    changed = False
+    for m in messages:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        if m.get("role") == "assistant" and out:
+            prev = out[-1] if isinstance(out[-1], dict) else None
+            if prev is not None and prev.get("role") == "assistant":
+                tcs = m.get("tool_calls")
+                prev_calls = prev.get("tool_calls")
+                # Form 1: this message declares tool calls and has no content.
+                if (isinstance(tcs, list) and tcs
+                        and _empty_content(m.get("content"))
+                        and isinstance(prev_calls, list) and prev_calls):
+                    prev["tool_calls"] = prev_calls + tcs
+                    _merge_reasoning_content(prev, m)
+                    changed = True
+                    continue
+                # Form 2: plain string content folds into a preceding
+                # content-less tool_calls assistant.
+                if ("tool_calls" not in m
+                        and isinstance(m.get("content"), str) and m["content"]
+                        and isinstance(prev_calls, list) and prev_calls
+                        and _empty_content(prev.get("content"))):
+                    prev["content"] = m["content"]
+                    _merge_reasoning_content(prev, m)
+                    changed = True
+                    continue
+        out.append(m)
+    if not changed:
+        return messages, False
+    return out, True
+
+
+def is_truncated_arguments(raw):
+    """True when a non-empty tool-arguments string is not valid JSON.
+
+    A stream cut off by max_tokens or a dropped connection leaves the last
+    tool call with half-written JSON. An empty/whitespace string is a legal
+    no-argument tool, and any parseable JSON (including null/scalars/arrays)
+    is the model's own output for the client to validate - only non-empty
+    unparsable strings count as truncation.
+    """
+    if not isinstance(raw, str):
+        return False
+    trimmed = raw.strip()
+    if not trimmed:
+        return False
+    try:
+        json.loads(trimmed)
+        return False
+    except Exception:
+        return True
+
+
+def drop_truncated_tool_calls(calls):
+    """Return the tool calls whose arguments are not half-written JSON."""
+    if not isinstance(calls, list):
+        return calls
+    kept = []
+    for call in calls:
+        if not isinstance(call, dict):
+            kept.append(call)
+            continue
+        fn = call.get("function")
+        if isinstance(fn, dict) and is_truncated_arguments(fn.get("arguments")):
+            continue
+        kept.append(call)
+    return kept
+
+
+def repack_tool_result_blocks(messages):
+    """Keep a tool_calls batch and its results adjacent.
+
+    The upstream requires the role:"tool" results to follow the assistant
+    message that requested them with nothing in between. Codex's
+    image_resize_notice, for one, arrives as a developer message right after a
+    tool output; with parallel calls it lands between two results, the pairing
+    reads as broken and the upstream rejects the whole request (code 11148),
+    retiring the conversation. This only reorders: same results, same relative
+    order, the intruders moved behind the batch.
+    """
+    if not isinstance(messages, list) or len(messages) < 3:
+        return messages, False
+    out = []
+    changed = False
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            out.append(m)
+            i += 1
+            continue
+        calls = m.get("tool_calls")
+        if not isinstance(calls, list) or not calls:
+            out.append(m)
+            i += 1
+            continue
+        want = set()
+        for tc in calls:
+            if isinstance(tc, dict):
+                tid = tc.get("id")
+                if isinstance(tid, str) and tid:
+                    want.add(tid)
+        out.append(m)
+        i += 1
+        results = []
+        between = []
+        saw_non_tool = False
+        while i < len(messages):
+            mm = messages[i]
+            if not isinstance(mm, dict):
+                break
+            role = mm.get("role")
+            if role == "tool":
+                tid = mm.get("tool_call_id")
+                if not (isinstance(tid, str) and tid in want):
+                    break
+                results.append(mm)
+                if saw_non_tool:
+                    changed = True
+                i += 1
+                continue
+            if not results:
+                break
+            # A following assistant.tool_calls opens the next batch: it must go
+            # back to the outer loop, or its own results never get repacked.
+            if role == "assistant" and isinstance(mm.get("tool_calls"), list) \
+                    and mm["tool_calls"]:
+                break
+            between.append(mm)
+            saw_non_tool = True
+            i += 1
+        out.extend(results)
+        out.extend(between)
+    if not changed:
+        return messages, False
+    return out, True
+
+
+def cleanup_orphan_tool_calls(messages):
+    """Drop tool calls that have no result, and results that have no call.
+
+    A failed tool call (bad arguments, timeout, unknown tool) leaves the client
+    with an assistant tool_calls entry it can never answer: the result message
+    is never written, yet the entry rides along with the history on every later
+    turn and the upstream rejects each one (code 11148), so a single failed
+    call can retire a whole conversation. Both sides are trimmed against the
+    same set of ids, so no half-pairing can survive the repair.
+    """
+    if not isinstance(messages, list) or not messages:
+        return messages, False
+    call_ids = set()
+    result_ids = set()
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        if role == "tool":
+            tid = m.get("tool_call_id")
+            if isinstance(tid, str) and tid:
+                result_ids.add(tid)
+        elif role == "assistant":
+            calls = m.get("tool_calls")
+            if isinstance(calls, list):
+                for tc in calls:
+                    if isinstance(tc, dict):
+                        tid = tc.get("id")
+                        if isinstance(tid, str) and tid:
+                            call_ids.add(tid)
+    if not call_ids and not result_ids:
+        return messages, False
+    keep = call_ids & result_ids
+    changed = False
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        calls = m.get("tool_calls")
+        if not isinstance(calls, list) or not calls:
+            continue
+        kept = [tc for tc in calls
+                if isinstance(tc, dict) and isinstance(tc.get("id"), str)
+                and tc["id"] in keep]
+        if len(kept) == len(calls):
+            continue
+        changed = True
+        if kept:
+            m["tool_calls"] = kept
+        else:
+            m.pop("tool_calls", None)
+    out = []
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "tool":
+            tid = m.get("tool_call_id")
+            if not (isinstance(tid, str) and tid in keep):
+                changed = True
+                continue
+        out.append(m)
+    if not changed:
+        return messages, False
+    return out, True
+
+
+def backfill_reasoning_content(messages, model, thinking_enabled=None):
+    if not model or not str(model).lower().startswith("deepseek"):
+        return messages
+    if thinking_enabled is None:
+        thinking_enabled = False
+    has_trace = False
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        reasoning = m.get("reasoning")
+        if isinstance(reasoning, str) and reasoning:
+            has_trace = True
+            break
+        if "reasoning_content" in m:
+            has_trace = True
+            break
+    if not thinking_enabled and not has_trace:
+        return messages
+    out = []
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "assistant":
+            item = dict(m)
+            rc = item.get("reasoning_content")
+            if not isinstance(rc, str):
+                # Non-string (null/number/absent) counts as missing, matching
+                # the official `typeof !== "string"` check.
+                legacy = item.get("reasoning")
+                rc = legacy if isinstance(legacy, str) else ""
+                item["reasoning_content"] = rc
+            # Mirror onto `reasoning` with a non-empty value: upstream rejects
+            # an empty/absent reasoning, while a whitespace placeholder passes
+            # its length check and carries no model-visible semantics.
+            existing = item.get("reasoning")
+            if not (isinstance(existing, str) and existing):
+                item["reasoning"] = rc if rc else " "
+            out.append(item)
+        else:
+            out.append(m)
+    return out
+
+
+def normalize_roles(messages):
+    """Map role names the upstream rejects onto ones it accepts.
+    WorkBuddy only knows system / user / assistant / tool. OpenAI's newer
+    "developer" role (used by the Codex CLI and current SDKs) is the same thing
+    as "system", but sending it verbatim fails with code 11128.
+    """
+    out = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        item = m
+        if m.get("role") == "developer":
+            item = dict(m)
+            item["role"] = "system"
+        out.append(item)
+    return out

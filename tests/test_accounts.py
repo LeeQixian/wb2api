@@ -77,11 +77,13 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(a.uid, "uid-a")
         self.assertEqual(a.realm, "cn")  # issuer-driven
         self.assertEqual(a.expires_at, 1893456000)
-        self.assertEqual(a.product, acct_mod.identity.PRODUCT_CLI)
-        # restart default: saved product is read but never auto-applied
-        b = Account({"accessToken": jwt, "product": "workbuddy"})
-        self.assertEqual(b.saved_product, "workbuddy")
-        self.assertEqual(b.product, acct_mod.identity.PRODUCT_CLI)
+        # hub v1.6.3 (issue #76): the outbound identity is read back from the
+        # credential file and survives a restart; a file without the field
+        # falls back to the desktop identity that normalize_product maps to.
+        self.assertEqual(a.product, acct_mod.identity.PRODUCT_DESKTOP)
+        b = Account({"accessToken": jwt, "product": "cli"})
+        self.assertEqual(b.product, "cli")
+        self.assertFalse(hasattr(b, "saved_product"))
 
     def test_save_writes_private_file(self):
         a = Account({"accessToken": make_jwt(), "nickname": "nick"})

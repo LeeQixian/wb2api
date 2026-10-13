@@ -36,6 +36,12 @@ class FakeAccount:
         self.errors = []
         self.model_cooldowns = {}
         self.cooldown_until = 0.0
+        self.balance_until = 0.0
+        self.soft_streak = 0
+        self.fails = 0
+        self.degrade_count = 0
+        self.breaker_until = 0.0
+        self.degrade_until = 0.0
         self.last_error = ""
         self.cleared = []
 
@@ -57,13 +63,52 @@ class FakeAccount:
         elif not model:
             self.cooldown_until = time.time() + cooldown
 
+    def note_success(self, model=None):
+        self.cleared.append(model)
+        if model:
+            self.model_cooldowns.pop(model, None)
+        self.soft_streak = self.fails = self.degrade_count = 0
+        self.cooldown_until = self.balance_until = 0.0
+        self.breaker_until = self.degrade_until = 0.0
+        self.last_error = ""
+
+    def note_failure(self, msg):
+        self.fails += 1
+        self.errors.append({"msg": msg, "model": None, "until": None})
+        return self.breaker_until
+
+    def note_unknown_failure(self, msg):
+        self.degrade_count += 1
+        self.errors.append({"msg": msg, "model": None, "until": None})
+        return self.degrade_until
+
+    def note_soft_rate(self, msg):
+        self.soft_streak += 1
+        self.errors.append({"msg": msg, "model": None, "until": None})
+        return 600.0
+
+    def note_unscoped_rate(self, model):
+        self.unscoped_streak = getattr(self, "unscoped_streak", 0) + 1
+        self.errors.append({"msg": "unscoped 429", "model": model, "until": None})
+        return 60.0 * self.unscoped_streak
+
+    def note_balance_cooled(self, msg="insufficient credits"):
+        self.balance_until = time.time() + 3600
+        self.errors.append({"msg": msg, "model": None, "until": None})
+        return self.balance_until
+
+    def revive_balance_cooldown(self):
+        return False
+
     def clear_error(self, model=None):
         self.cleared.append(model)
         if model:
             self.model_cooldowns.pop(model, None)
 
     def throttle_wait(self, model=None):
-        return max(0.0, self.model_cooldowns.get(model, 0.0) - time.time())
+        return max(0.0, self.cooldown_until - time.time(),
+                   self.balance_until - time.time(),
+                   self.model_cooldowns.get(model, 0.0) - time.time())
 
     def set_product(self, value):
         if value == self.product:

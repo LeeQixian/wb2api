@@ -1,0 +1,431 @@
+"""POST routes: /realm, /v1/chat/completions and /v1/responses."""
+
+import json
+import time
+import urllib.error
+from urllib.parse import urlparse
+
+from gateway import settings, translate, upstream, webtools as wb_webtools
+from gateway.common.log import log
+from gateway.http import state as _state
+from gateway.http.errors import BadJSON, BodyTooLarge
+from gateway.http.usage import (_usage_fields, extract_session_key,
+                                record_row)
+
+
+class PostRoutes(object):
+    """POST handlers mixed into the request handler."""
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if path in ("/realm", "/realm/set"):
+            if not self._authorized():
+                return
+            payload = self._payload_or_error()
+            if payload is None:
+                return
+            realm = str(payload.get("realm") or "").strip().lower()
+            if realm not in ("intl", "cn"):
+                return self._error(400, "realm must be 'intl' or 'cn'",
+                                   "invalid_request_error")
+            upstream.save_persisted_realm(_state.ACCOUNTS_DIR, realm)
+            upstream.set_realm(realm)
+            return self._json(200, {"current": realm})
+        if path not in ("/v1/chat/completions", "/chat/completions",
+                        "/v1/completions", "/completions",
+                        "/v1/responses", "/responses"):
+            return self._error(404, "not found", "invalid_request_error")
+        if not self._authorized():
+            return
+        payload = self._payload_or_error()
+        if payload is None:
+            return
+        # Upstream chat calls can hold this thread for up to 600s; bound the
+        # in-flight count so a few slow clients cannot exhaust the pool.
+        if not _state._chat_slots.acquire(timeout=_state.CHAT_SLOT_WAIT_SECONDS):
+            return self._error(503, "gateway is at its concurrent chat limit "
+                                    "(%d in flight); retry shortly" % _state.MAX_CONCURRENT_CHAT)
+        try:
+            if path in ("/v1/responses", "/responses"):
+                return self._handle_responses(payload)
+            return self._dispatch_chat_post(payload)
+        finally:
+            _state._chat_slots.release()
+
+
+    def _pin_realm(self, prefix_realm):
+        """Effective per-request exit: model-name prefix > X-Realm/?realm=.
+        None defers to upstream's model-based auto-routing. The Handler
+        instance is reused across keep-alive requests, so this recomputes
+        from scratch on every request that reaches a chat route."""
+        # None only when BOTH are absent: an explicit header still pins after
+        # a previous prefixed request on the same keep-alive connection
+        # (self._pinned_realm must never survive into that request).
+        explicit = self._request_realm()
+        self._pinned_realm = prefix_realm or explicit
+
+
+    def _split_model(self, raw_model):
+        model, prefix_realm = translate.split_realm_prefix(raw_model)
+        if prefix_realm:
+            self._pin_realm(prefix_realm)
+        else:
+            self._pin_realm(None)
+        return model, prefix_realm
+
+
+    def _dispatch_chat_post(self, payload):
+        requested = str(payload.get("model") or "hy4-preview")
+        model, prefix_realm = self._split_model(requested)
+        if prefix_realm:
+            payload["model"] = model
+        blocked = self._realm_guard(model)
+        if blocked:
+            return self._error(400, blocked, "invalid_request_error")
+        forwarded = translate.build_upstream_body(payload)
+        log("chat: model=%s stream=%s msgs=%d"
+            % (requested, bool(payload.get("stream")),
+               len(forwarded.get("messages") or [])))
+        session_key = extract_session_key(self.headers, payload)
+        fp = translate.prompt_fingerprint(forwarded.get("messages"))
+        want_stream = bool(payload.get("stream"))
+        t_start = time.time()
+        try:
+            upstream_resp, account = self.open_upstream(payload, session_key,
+                                                        prebuilt=forwarded)
+        except Exception as exc:
+            return self._upstream_error(requested, exc, t_start, fp)
+        with upstream_resp:
+            if want_stream:
+                return self._stream_chat(upstream_resp, requested, fp, account, t_start)
+            return self._nonstream_chat(upstream_resp, requested, fp, account, t_start)
+
+
+    def _handle_responses(self, payload):
+        requested = str(payload.get("model") or "deepseek-v4.1-flash")
+        model, prefix_realm = self._split_model(requested)
+        if prefix_realm:
+            payload["model"] = model
+        if payload.get("previous_response_id"):
+            self._handle_expect_continue()
+            self._discard_body()
+            return self._json(400, {"error": {
+                "message": "previous_response_id is not supported: this gateway "
+                           "stores no response state. Send the full conversation "
+                           "in 'input' instead.",
+                "type": "invalid_request_error", "code": 400}})
+        blocked = self._realm_guard(model)
+        if blocked:
+            return self._error(400, blocked, "invalid_request_error")
+        session_key = extract_session_key(self.headers, payload)
+        # outbound and return path must see the same merged tool list (hub 23964ac)
+        all_tools = payload.get("tools")
+        all_tools = list(all_tools) if isinstance(all_tools, list) else []
+        all_tools.extend(translate.additional_tools_from_input(payload))
+        custom_names = translate.custom_tool_names(all_tools)
+        chat_req = translate.responses_to_chat(payload)
+        ns_map = chat_req.pop("_namespace_map", None)
+        request_meta = {
+            "tools": all_tools,
+            "tool_choice": payload.get("tool_choice", "auto"),
+            "parallel_tool_calls": payload.get("parallel_tool_calls", True),
+        }
+        want_stream = bool(payload.get("stream"))
+        t_start = time.time()
+        fp = translate.prompt_fingerprint(chat_req.get("messages"))
+        log("responses: model=%s stream=%s msgs=%d custom_tools=%s"
+            % (requested, want_stream, len(chat_req.get("messages") or []),
+               sorted(custom_names) or "-"))
+        req_realm = getattr(self, "_pinned_realm", None)
+        try:
+            upstream_resp, account = self.open_upstream(chat_req, session_key)
+        except Exception as exc:
+            return self._upstream_error(requested, exc, t_start, fp)
+        with upstream_resp:
+            if want_stream:
+                return self._stream_responses(
+                    upstream_resp, requested, custom_names, request_meta, fp, account,
+                    t_start, ns_map, base_body=chat_req, session_key=session_key,
+                    realm=req_realm)
+            return self._nonstream_responses(
+                upstream_resp, requested, custom_names, request_meta, fp, account,
+                t_start, ns_map, base_body=chat_req, session_key=session_key,
+                realm=req_realm)
+
+
+    def open_upstream(self, payload, session_key, prebuilt=None):
+        # None when the caller did not pin a realm: upstream then routes by
+        # model (exclusive models to their own exit, shared ones to the
+        # global realm).
+        return upstream.open_upstream(_state.POOL, payload, session_key=session_key,
+                                      target_realm=getattr(self, "_pinned_realm", None),
+                                      log=log, prebuilt_body=prebuilt)
+
+
+    def _upstream_error(self, model, exc, t_start, fp):
+        wall = int((time.time() - t_start) * 1000)
+        account_uid = getattr(exc, "account_uid", None)
+        if isinstance(exc, upstream.ContentRejected):
+            record_row({"model": model, "outcome": "error", "status": 403,
+                        "error": exc.detail[:200], "elapsed_ms": wall,
+                        "account": account_uid})
+            return self._error(403, "upstream 403: %s" % (exc.detail or "content rejected"),
+                               "invalid_request_error")
+        if isinstance(exc, upstream.RateLimited):
+            record_row({"model": model, "outcome": "error", "status": 429,
+                        "error": exc.detail[:200], "elapsed_ms": wall,
+                        "account": account_uid})
+            return self._rate_limited(exc)
+        if isinstance(exc, urllib.error.HTTPError):
+            try:
+                detail = exc.read(600).decode("utf-8", "replace")
+            except Exception:
+                detail = str(exc)
+            record_row({"model": model, "outcome": "error", "status": exc.code,
+                        "error": detail[:200], "elapsed_ms": wall, "account": account_uid})
+            return self._error(exc.code, "upstream %s: %s" % (exc.code, detail))
+        message = str(exc)
+        record_row({"model": model, "outcome": "error", "status": 502,
+                    "error": message[:200], "elapsed_ms": wall, "account": account_uid})
+        if message.startswith("no usable account"):
+            return self._error(503, message + " - add one with: python3 -m gateway.wbctl login")
+        return self._error(502, "upstream unreachable: %s" % message)
+
+
+    def _start_sse(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self._cors()
+        self.end_headers()
+
+
+    def _stream_chat(self, upstream_resp, model, fp, account, t_start):
+        self._start_sse()
+        emitted = False
+        last_usage = None
+        first_ms = None
+        streamed_text = []
+        try:
+            for line in upstream_resp:
+                data = translate.strip_data_prefix(line.decode("utf-8", "replace"))
+                if not data or data == "[DONE]" or data.startswith(":"):
+                    continue
+                try:
+                    maybe = json.loads(data)
+                    u = maybe.get("usage")
+                    if u and (last_usage is None or
+                              (u.get("total_tokens") or 0) >= (last_usage.get("total_tokens") or 0)):
+                        last_usage = u
+                    for ch in (maybe.get("choices") or []):
+                        delta = ch.get("delta") or {}
+                        if delta.get("content"):
+                            streamed_text.append(delta["content"])
+                        if delta.get("reasoning_content"):
+                            streamed_text.append(delta["reasoning_content"])
+                except Exception:
+                    pass
+                cleaned = translate.clean_chunk(data)
+                if not cleaned:
+                    continue
+                if model:
+                    # OpenAI echoes request.model; with an exit prefix the
+                    # upstream chunks carry the bare name, so rewrite it back
+                    try:
+                        cobj = json.loads(cleaned)
+                        if cobj.get("model") != model:
+                            cobj["model"] = model
+                            cleaned = json.dumps(cobj, ensure_ascii=False)
+                    except Exception:
+                        pass
+                if first_ms is None:
+                    first_ms = int((time.time() - t_start) * 1000)
+                emitted = True
+                self.wfile.write(("data: %s\n\n" % cleaned).encode("utf-8"))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            wall = int((time.time() - t_start) * 1000)
+            record_row({"model": model, "outcome": "client_aborted", "status": 200,
+                        "stream": True, "elapsed_ms": wall, "ttft_ms": first_ms,
+                        "account": account.uid, "fp": fp, **_usage_fields(last_usage)})
+            return
+        except Exception as exc:
+            wall = int((time.time() - t_start) * 1000)
+            log("stream aborted: %s" % exc, "WARN")
+            record_row({"model": model, "outcome": "upstream_aborted", "status": 502,
+                        "error": str(exc)[:200], "stream": True, "elapsed_ms": wall,
+                        "ttft_ms": first_ms, "account": account.uid, "fp": fp,
+                        **_usage_fields(last_usage)})
+            try:
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except Exception:
+                pass
+            return
+        if not emitted:
+            err = json.dumps({"error": {"message": "empty upstream stream",
+                                        "type": "server_error"}})
+            self.wfile.write(("data: %s\n\n" % err).encode("utf-8"))
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+        wall = int((time.time() - t_start) * 1000)
+        if last_usage is None or (last_usage.get("total_tokens") or 0) == 0:
+            comp = translate.estimate_tokens("".join(streamed_text))
+            if comp:
+                last_usage = {"prompt_tokens": max(1, comp // 2),
+                              "completion_tokens": comp,
+                              "total_tokens": max(1, comp // 2) + comp}
+        record_row({"model": model, "outcome": "ok", "status": 200, "stream": True,
+                    "elapsed_ms": wall, "ttft_ms": first_ms, "gen_ms":
+                    (wall - first_ms) if first_ms is not None else None,
+                    "account": account.uid, "fp": fp, **_usage_fields(last_usage)})
+
+
+    def _nonstream_chat(self, upstream_resp, model, fp, account, t_start):
+        try:
+            result = translate.aggregate_stream(upstream_resp, model, None)
+        except Exception as exc:
+            record_row({"model": model, "outcome": "error", "status": 502,
+                        "error": str(exc)[:200],
+                        "elapsed_ms": int((time.time() - t_start) * 1000),
+                        "account": account.uid, "fp": fp})
+            return self._error(502, "upstream stream error: %s" % exc)
+        wall = int((time.time() - t_start) * 1000)
+        first_at = result.pop("first_chunk_at", None)
+        result.pop("elapsed_ms", None)
+        result["model"] = model   # echo the requested name, prefix included
+        record_row({"model": model, "outcome": "ok", "status": 200, "stream": False,
+                    "elapsed_ms": wall,
+                    "ttft_ms": int((first_at - t_start) * 1000) if first_at else None,
+                    "account": account.uid, "fp": fp, **_usage_fields(result.get("usage"))})
+        return self._json(200, result)
+
+
+    def _stream_responses(self, upstream_resp, model, custom_names, request_meta,
+                          fp, account, t_start, ns_map, base_body=None,
+                          session_key=None, realm=None):
+        self._start_sse()
+        holder = {"usage": None, "custom_names": custom_names,
+                  "request_meta": request_meta, "namespace_map": ns_map,
+                  "base_body": base_body,
+                  "base_messages": (base_body or {}).get("messages"),
+                  "session_key": session_key, "realm": realm}
+        first_ms = None
+        upstream = upstream_resp
+        try:
+        # When the model asks for web_search / web_fetch, the gateway runs it
+        # and feeds the result back; the client sees one continuous response.
+            rounds = 0
+            total_usage = None
+            while True:
+                holder.pop("internal_calls", None)
+                holder.pop("suppress_completion", None)
+                holder["suppress_lifecycle"] = rounds > 0
+                for frame in translate.stream_responses_events(upstream, model, holder):
+                    if first_ms is None:
+                        first_ms = int((time.time() - t_start) * 1000)
+                    self.wfile.write(translate.clean_responses_frame(frame))
+                    self.wfile.flush()
+                # Every round really spends tokens; accumulate them for accounting.
+                total_usage = translate.sum_usage(total_usage, holder.get("usage"))
+                internal = holder.get("internal_calls") or []
+                if not internal:
+                    break
+                rounds += 1
+                # Retract the tools and let the model close with text; synthesize nothing.
+                give_up = rounds > wb_webtools.MAX_WEB_ROUNDS
+                try:
+                    upstream.close()
+                except Exception:
+                    pass
+                upstream, account = translate.follow_up_with_tool_results(
+                    _state.POOL, internal, holder, model, session_key, t_start,
+                    drop_tools=give_up)
+            if total_usage:
+                holder["usage"] = total_usage
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            record_row({"model": model, "outcome": "client_aborted", "status": 200,
+                        "stream": True, "elapsed_ms": int((time.time() - t_start) * 1000),
+                        "ttft_ms": first_ms, "account": account.uid, "fp": fp,
+                        **_usage_fields(holder.get("usage"))})
+            return
+        except Exception as exc:
+            log("responses stream aborted: %s" % exc, "WARN")
+            record_row({"model": model, "outcome": "upstream_aborted", "status": 502,
+                        "error": str(exc)[:200], "stream": True,
+                        "elapsed_ms": int((time.time() - t_start) * 1000),
+                        "ttft_ms": first_ms, "account": account.uid, "fp": fp,
+                        **_usage_fields(holder.get("usage"))})
+            try:
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except Exception:
+                pass
+            return
+        finally:
+        # Gateway rounds replace the upstream, so the outer with only knows
+        # the first one; close the last one here.
+            try:
+                upstream.close()
+            except Exception:
+                pass
+        record_row({"model": model, "outcome": "ok", "status": 200, "stream": True,
+                    "elapsed_ms": int((time.time() - t_start) * 1000),
+                    "ttft_ms": first_ms, "account": account.uid, "fp": fp,
+                    **_usage_fields(holder.get("usage"))})
+
+
+    def _nonstream_responses(self, upstream_resp, model, custom_names, request_meta,
+                             fp, account, t_start, ns_map, base_body=None,
+                             session_key=None, realm=None):
+        # Same as streaming: gateway-run web calls stay invisible until the
+        # final Responses object, or the raw function_call hits the client's
+        # unsupported-call handler.
+        sources = []
+        rounds = 0
+        upstream = upstream_resp
+        # With the switch off, do not intercept same-named calls; those are the client's.
+        web_tools = translate.web_tools_active(base_body)
+        while True:
+            try:
+                chat_obj = translate.aggregate_stream(upstream, model, None)
+            except Exception as exc:
+                record_row({"model": model, "outcome": "error", "status": 502,
+                            "error": str(exc)[:200],
+                            "elapsed_ms": int((time.time() - t_start) * 1000),
+                            "account": account.uid, "fp": fp})
+                return self._error(502, "upstream stream error: %s" % exc)
+            calls = translate.internal_calls_from_chat(chat_obj, web_tools=web_tools)
+            if not calls:
+                break
+            rounds += 1
+            give_up = rounds > wb_webtools.MAX_WEB_ROUNDS
+            try:
+                upstream.close()
+            except Exception:
+                pass
+            holder = {"base_messages": (base_body or {}).get("messages"),
+                      "base_body": base_body, "realm": realm,
+                      "web_sources": sources}
+            try:
+                upstream, account = translate.follow_up_with_tool_results(
+                    _state.POOL, calls, holder, model, session_key, t_start,
+                    drop_tools=give_up)
+            except Exception as exc:
+                record_row({"model": model, "outcome": "error", "status": 502,
+                            "error": "web tool follow-up failed: %s" % str(exc)[:200],
+                            "elapsed_ms": int((time.time() - t_start) * 1000),
+                            "account": account.uid, "fp": fp})
+                return self._error(502, "web tool follow-up failed: %s" % exc)
+            sources = holder.get("web_sources") or sources
+        wall = int((time.time() - t_start) * 1000)
+        chat_obj.pop("first_chunk_at", None)
+        chat_obj.pop("elapsed_ms", None)
+        chat_obj["model"] = model   # echo the requested name, prefix included
+        result = translate.chat_to_response(chat_obj, model, custom_names,
+                                            request_meta, ns_map, sources=sources)
+        record_row({"model": model, "outcome": "ok", "status": 200, "stream": False,
+                    "elapsed_ms": wall, "account": account.uid, "fp": fp,
+                    **_usage_fields(chat_obj.get("usage"))})
+        return self._json(200, result)

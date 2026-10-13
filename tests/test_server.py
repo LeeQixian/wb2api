@@ -159,7 +159,8 @@ class ServerCase(unittest.TestCase):
                                       [{"role": "user", "content": "hi"}]},
                              headers)
 
-    def _fake_open(self, pool, payload, session_key=None, target_realm=None, log=None):
+    def _fake_open(self, pool, payload, session_key=None, target_realm=None,
+                    log=None, prebuilt_body=None):
         self.calls.append(payload)
         self.realms.append(target_realm)
         kind, err = self.open_result
