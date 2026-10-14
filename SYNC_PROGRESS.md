@@ -5,11 +5,20 @@
 上游仓库：github.com/ardeyouxipianyi/workbuddy2api-hub
 （本地备份 /home/Arisha/Projects/Watch/workbuddy2api-hub/）
 
-同步到：`4c6fab5`  release: v1.7.2（tag v1.7.2 之后 4 个提交）
+同步到：`c7dad8f`  release: v1.7.3
 移植起点：`650b659`  release: v1.5.4（首次瘦身移植的基线）
 
-已跟进区间：v1.5.5 -> v1.7.2。上游 bug 修复照搬；上游新功能加开关默认关；
+已跟进区间：v1.5.5 -> v1.7.3。上游 bug 修复照搬；上游新功能加开关默认关；
 与「本地独有改动」冲突的一律以本地为准。
+
+v1.7.3 移植明细（4c6fab5..c7dad8f）：
+- de4fb53 webagent 补发 session/set_model（缺了它网页腿跑 Auto 扣积分）
+- ddda600 daily_chat ok 以网页腿为准，失败不再谎报成功
+- 17c0869 exc_detail：hiccup/失败日志带底层原因，不再只有一串 URLError
+- 本地决定：DAILY_CHAT_MODEL 由 deepseek-v4.1-flash 改 hy3（均 x0.00，
+  不跟上游的 daily_chat_model 设置项，不动 ds 额度）
+- 不移植：bce5c96/3c80073 SSE 分块读写与共享 SSLContext（高并发优化，单机无感）、
+  761db37 daily_chat_model 设置、195753c usage 索引（看板专属）、89802ad CRLF
 
 ## 明确不同步
 

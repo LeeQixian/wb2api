@@ -332,7 +332,7 @@ class DailyChatWebLeg(unittest.TestCase):
         with mock.patch.object(acc_mod, "urlopen",
                                lambda *x, **k: self.FakeResp()):
             res = a.daily_chat(web=True)
-        self.assertTrue(res["ok"])
+        self.assertFalse(res["ok"])   # hub ddda600: web leg owns the verdict
         self.assertIsNone(a.last_daily_chat)
         self.assertTrue(a.can_daily_chat())
 

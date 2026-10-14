@@ -276,5 +276,49 @@ class SchedulerBehaviour(unittest.TestCase):
         self.assertIn("暂无可用", "\n".join(s.logs))
 
 
+class WebAgentSetModel(unittest.TestCase):
+    # hub de4fb53: the manifest model is decorative; session/set_model pins it.
+    class Chan:
+        def __init__(self, link, token, ua, log=None, proxy=""):
+            self.requests = []
+            self.updates = 0
+            self.chunks = 0
+        def open(self): pass
+        def close(self): pass
+        def request(self, method, params, rid):
+            self.requests.append((method, rid))
+            if method == "session/set_model" and params.get("modelId") == "boom":
+                raise RuntimeError("set_model exploded")
+
+    def _run(self, model):
+        from gateway import webagent as wa
+        chan = {}
+        def factory(*a, **k):
+            c = self.Chan(*a, **k)
+            chan["c"] = c
+            return c
+        res = wa.run_turn("l", "t", "s", "/w", "Hi", "ua", poll_status=None,
+                          wait_seconds=1, poll_interval=0, proxy="",
+                          channel_factory=factory, model=model)
+        return chan["c"], res
+
+    def test_sequence_with_model(self):
+        c, _ = self._run("hy3")
+        self.assertEqual([m for m, _ in c.requests],
+                         ["initialize", "session/load", "session/set_model",
+                          "session/prompt"])
+        self.assertEqual([r for _, r in c.requests], [1, 2, 3, 4])
+
+    def test_sequence_without_model_unchanged(self):
+        c, _ = self._run(None)
+        self.assertEqual([m for m, _ in c.requests],
+                         ["initialize", "session/load", "session/prompt"])
+        self.assertEqual([r for _, r in c.requests], [1, 2, 4])  # prompt id fixed at 4
+
+    def test_set_model_failure_does_not_kill_the_turn(self):
+        c, res = self._run("boom")
+        self.assertIn("session/prompt", [m for m, _ in c.requests])
+        self.assertFalse(res["ok"])  # no poll_status -> timeout path, but ran on
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

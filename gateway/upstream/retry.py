@@ -137,6 +137,14 @@ def is_transient(exc):
     return any(m in t for m in markers)
 
 
+def exc_detail(exc, limit=180):
+    # "URLError" alone hides the cause; .reason is the clean inner text.
+    reason = getattr(exc, "reason", None)
+    text = str(reason) if reason is not None else str(exc)
+    text = (text or "").strip()
+    return ("%s: %s" % (type(exc).__name__, text))[:limit] if text else type(exc).__name__
+
+
 def parse_rate_limit_reset(detail):
     """Pull the reset time out of an upstream 429 body, if it names one.
 

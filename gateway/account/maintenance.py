@@ -158,7 +158,8 @@ class MaintenanceMixin(object):
             link, token, session_id, cwd, prompt or DAILY_CHAT_WEB_PROMPT,
             WEB_USER_AGENT,
             poll_status=lambda: self._web_conversation_status(conversation),
-            wait_seconds=WEB_TURN_TIMEOUT, proxy=self.proxy)
+            wait_seconds=WEB_TURN_TIMEOUT, proxy=self.proxy,
+            model=DAILY_CHAT_MODEL)
         result["conversation"] = conversation
         if result.get("ok"):
             result["msg"] = "网页通道会话跑完：%d 段输出，%d ms" % (
@@ -235,7 +236,10 @@ class MaintenanceMixin(object):
                                         web_res.get("chunks") or 0,
                                         web_res.get("elapsed_ms") or 0))
                 else:
-                    result["msg"] = ("每日活跃对话成功完成（网页通道失败：%s）"
+                    # Only the web leg earns the bonus; a dead one is a failed day.
+                    result["ok"] = False
+                    result["error"] = "网页通道失败：%s" % web_res.get("error")
+                    result["msg"] = ("每日活跃对话未完成（网页通道失败：%s）"
                                      % web_res.get("error"))
             return result
         except urllib.error.HTTPError as exc:

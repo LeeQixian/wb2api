@@ -186,14 +186,24 @@ class AcpChannel(object):
                 pass
 
 
+def _set_model(channel, session_id, model, log):
+    # Manifest model is decorative; only this ACP call picks the running one.
+    try:
+        channel.request("session/set_model",
+                        {"sessionId": session_id, "modelId": model}, 3)
+    except Exception as exc:
+        log("web agent: 设置模型 %s 失败 (%s)，本轮按会话默认模型跑" % (model, exc))
+
+
 def run_turn(link, token, session_id, cwd, prompt, user_agent, poll_status=None,
              wait_seconds=120, poll_interval=3, log=None, proxy="",
-             channel_factory=AcpChannel):
+             channel_factory=AcpChannel, model=None):
     """Attach to the sandbox and drive the turn to completion.
 
     poll_status is the caller's conversation-state lookup (console API):
     completed finishes, failed/error stops. The result carries event and delta
-    counts so the check-in log shows whether the turn actually ran.
+    counts so the check-in log shows whether the turn actually ran. Non-empty
+    model: pin it via session/set_model after load (hub de4fb53).
     """
     log = log or (lambda *a, **k: None)
     started = time.time()
@@ -209,9 +219,11 @@ def run_turn(link, token, session_id, cwd, prompt, user_agent, poll_status=None,
         channel.request("session/load",
                         {"sessionId": session_id, "cwd": cwd or "/workspace",
                          "mcpServers": []}, 2)
+        if model:
+            _set_model(channel, session_id, model, log)
         channel.request("session/prompt",
                         {"sessionId": session_id,
-                         "prompt": [{"type": "text", "text": prompt}]}, 3)
+                         "prompt": [{"type": "text", "text": prompt}]}, 4)
         deadline = time.time() + max(1, int(wait_seconds))
         while time.time() < deadline:
             if poll_status is not None:

@@ -8,7 +8,7 @@ from gateway.upstream.catalog import CHAT_PATH
 from gateway.upstream.errors import ContentRejected, RateLimited
 from gateway.upstream.guards import (apply_daily_token_limit, auto_switch_product_enabled, seconds_until_local_midnight)
 from gateway.upstream.realm import get_realm
-from gateway.upstream.retry import (AUTO_SWITCH_PRODUCT, MAX_PRODUCT_SWITCHES, RESTRICTED_403_COOLDOWN, credential_scope_phrase, is_transient, parse_rate_limit_reset, rate_limit_is_account_level, rate_limit_is_soft_shape, realm_model_throttled, reset_switch_counter, restriction_is_account_level, retry_after_seconds)
+from gateway.upstream.retry import (AUTO_SWITCH_PRODUCT, MAX_PRODUCT_SWITCHES, RESTRICTED_403_COOLDOWN, credential_scope_phrase, exc_detail, is_transient, parse_rate_limit_reset, rate_limit_is_account_level, rate_limit_is_soft_shape, realm_model_throttled, reset_switch_counter, restriction_is_account_level, retry_after_seconds)
 from gateway.upstream.timeouts import (_apply_stream_idle_timeout,
                                        upstream_timeouts)
 import json
@@ -221,14 +221,15 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
             if is_transient(exc):
                 transient_hits += 1
                 log("upstream connection hiccup for '%s' on %s (%s), retrying"
-                    % (model, account.uid[:8], type(exc).__name__))
+                    % (model, account.uid[:8], exc_detail(exc)))
                 last_error = exc
                 time.sleep(min(0.6 * transient_hits, 2.0))
                 continue
-            account.note_unknown_failure(str(exc)[:120])
-            account.note_error(str(exc)[:120], cooldown=60, single_account=(total <= 1))
+            detail = exc_detail(exc, 120)
+            account.note_unknown_failure(detail)
+            account.note_error(detail, cooldown=60, single_account=(total <= 1))
             log("upstream failure on %s for '%s': %s"
-                % (account.uid[:8], model, str(exc)[:120]))
+                % (account.uid[:8], model, detail))
             last_error = exc
             continue
     if last_error is not None:
