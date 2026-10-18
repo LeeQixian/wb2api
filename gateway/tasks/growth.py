@@ -83,11 +83,8 @@ def fetch_growth_summary(account):
 
 
 def accept_tasks(account, codes, chunk=20):
-    """Accept tasks in batches.
-
-    Returns {"ok": bool, "accepted": [...], "failed": [...], "msg": str}; the
-    upstream reports per-task status (accepted / already_accepted / failure).
-    """
+    """Accept tasks in batches; returns {"ok", "accepted", "failed", "msg"}.
+    The upstream reports per-task status (accepted / already_accepted / failure)."""
     out = {"ok": True, "accepted": [], "failed": [], "msg": "", "reasons": []}
     if not codes:
         return out
@@ -197,11 +194,8 @@ def claim_task(account, code):
 
 
 def build_event(account, kind, idx=0, expert=None):
-    """Build a canonical event payload for the given kind.
-
-    expert: (expert_id, expert_name). Expert/team events need a fresh id each
-    time; the upstream dedupes on (eventCode, id) and repeats never advance.
-    """
+    """Build a canonical event payload for the given kind (expert/team).
+    These need a fresh id each time: the upstream dedupes on (eventCode, id)."""
     now = int(time.time() * 1000)
     cid = f"wb-task-{now}-{idx}"
     rid = f"{cid}-req"
@@ -266,11 +260,8 @@ def build_event(account, kind, idx=0, expert=None):
 
 
 def report_events(account, events, base=None):
-    """Report an event array upstream.
-
-    Posts to copilot.tencent.com (the chat side), the address the desktop
-    client uses; events there advance growth progress in real time.
-    """
+    """Report an event array upstream, to the chat host copilot.tencent.com.
+    That is the address the desktop client uses; events advance growth there."""
     if base is None:
         base = CHAT_BASE
     url = base + "/v2/report"

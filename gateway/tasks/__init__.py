@@ -1,7 +1,4 @@
-"""Task engine facade.
-
-Exposes the羊毛 (growth/travel) surface as gateway.tasks.X.
-"""
+"""Task engine facade: exposes the growth/travel surface as gateway.tasks.X."""
 import sys
 import types
 

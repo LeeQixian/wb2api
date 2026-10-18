@@ -1,31 +1,30 @@
-"""wb_fingerprint.py —— 统一设备指纹稳定派生模块 (derive_id)
-
-无论是国内版 (copilot.tencent.com / codebuddy.cn) 还是国际版 (www.workbuddy.ai)，
-均通过本模块基于账号 UID 和加盐哈希单向派生出固定的伪物理设备特征 (machineId, sessionId, reqId)，
-确保每个账号永远来自一台固定的物理设备，且多账号之间天然隔离防风控关联。
-"""
+"""Device fingerprint derivation: ids per (uid + salt), stable and distinct
+across accounts; never process-level constants (they would link accounts)."""
 import hashlib
 import time
+import uuid
 
 
 def derive_id(uid: str, salt: str) -> str:
-    """由 uid + salt 稳定派生一个 36 位十六进制设备/会话标识。
-
-    幂等：同一账号每次调用产生相同值，彻底避免随机机器码导致的上游风控。
-    """
+    """Stable hyphenated UUIDv4-shaped id from uid + salt."""
     seed = f"{salt}:{uid or 'anonymous'}"
-    return hashlib.md5(seed.encode("utf-8")).hexdigest()[:36]
+    h = hashlib.md5(seed.encode("utf-8")).hexdigest()
+    h = h[:12] + "4" + h[13:16] + "a" + h[17:]
+    return "%s-%s-%s-%s-%s" % (h[0:8], h[8:12], h[12:16], h[16:20], h[20:32])
 
 
-def generate_request_id(uid: str) -> str:
-    """生成带稳定前缀与微秒时间戳的防风控 X-Request-ID。"""
-    prefix = derive_id(uid, "req")
-    suffix = str(time.time_ns() % 1000000).zfill(6)
-    return f"{prefix}-{suffix}"
+def session_id(uid: str) -> str:
+    """Per-account sessionId; must never become a process constant."""
+    return derive_id(uid, "session")
+
+
+def generate_request_id(uid: str = "") -> str:
+    """X-Request-ID: random 32-hex, not account-derived (5.8.4 shape)."""
+    return uuid.uuid4().hex
 
 
 def get_desktop_fingerprint(uid: str, nickname: str = "", os_name: str = "win32") -> dict:
-    """生成上报事件所需的标准完整桌面端指纹。"""
+    """Desktop fingerprint payload for activity reporting."""
     now = int(time.time() * 1000)
     return {
         "timezone": "Asia/Shanghai",

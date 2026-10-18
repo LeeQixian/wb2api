@@ -1,16 +1,6 @@
 # -*- coding: utf-8 -*-
 """Drive one web-console (cloud agent) conversation via ACP over HTTP+SSE.
-
-POST /console/as/conversations/ only *queues* a conversation; the agent runs
-once a client attaches to that conversation's sandbox (the `link` from
-GET .../{id}/session) and requests the turn. Sequence: GET <link> with
-Accept: text/event-stream (returns an SSE stream and an Acp-Connection-Id
-header), then POST <link> with JSON-RPC initialize -> session/load ->
-session/prompt, while session/update notifications stream back.
-
-Only the parts the daily check-in needs are implemented: no tools, no
-terminal, no filesystem callbacks.
-"""
+The agent only runs once a client attaches to the sandbox link and prompts."""
 
 import base64
 import http.client
@@ -92,7 +82,7 @@ class AcpChannel(object):
         cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         conn = cls(parsed.hostname, port, timeout=self.timeout)
         if self.proxy:
-            # set_tunnel does not add Proxy-Authorization on its own (hub a94eb84)
+            # set_tunnel does not add Proxy-Authorization on its own
             host, proxy_port, tunnel_headers = _proxy_parts(self.proxy)
             conn = cls(host, proxy_port or 8080, timeout=self.timeout)
             conn.set_tunnel(parsed.hostname, port, headers=tunnel_headers)
@@ -199,12 +189,7 @@ def run_turn(link, token, session_id, cwd, prompt, user_agent, poll_status=None,
              wait_seconds=120, poll_interval=3, log=None, proxy="",
              channel_factory=AcpChannel, model=None):
     """Attach to the sandbox and drive the turn to completion.
-
-    poll_status is the caller's conversation-state lookup (console API):
-    completed finishes, failed/error stops. The result carries event and delta
-    counts so the check-in log shows whether the turn actually ran. Non-empty
-    model: pin it via session/set_model after load (hub de4fb53).
-    """
+    poll_status reports conversation state; an empty model keeps the default."""
     log = log or (lambda *a, **k: None)
     started = time.time()
     channel = channel_factory(link, token, user_agent, log=log, proxy=proxy)

@@ -1,22 +1,5 @@
-"""Runtime settings for the gateway: one optional API key + guard switches.
-
-`accounts/settings.json` holds {"api_key": "..."} plus the operator switches
-ported from the hub panel:
-
-  reserve_credits      low-credit guard (0 = off)
-  daily_token_limit    per-account daily token budget (0 = off)
-  auto_switch_product  429 identity rotation (off unless turned on)
-  daily_chat_web       intl web-channel activity step (on unless turned off)
-  local_web_tools      gateway-side web_search/web_fetch (off, opt-in)
-
-Auth semantics (deliberate, per owner's request):
-
-  - no key configured  -> every request passes (local debugging mode)
-  - key configured     -> /v1 inference routes require it as a Bearer header
-
-Comparison uses hmac.compare_digest. The panel password / multi-key /
-PBKDF2 machinery of the original hub project is gone: there is no panel.
-"""
+"""Runtime settings: optional API key plus panel switches (accounts/settings.json).
+No key lets every request through; with one, /v1 routes need the Bearer header."""
 import hmac
 import json
 import os
@@ -25,7 +8,7 @@ import threading
 
 SETTINGS_NAME = "settings.json"
 _load_lock = threading.Lock()
-# (path, mtime, size) -> parsed dict; save() invalidates explicitly (hub 8bc1f0d)
+# (path, mtime, size) -> parsed dict; save() invalidates explicitly
 _load_cache = {"key": None, "value": {}}
 
 
@@ -101,10 +84,7 @@ def auth_required(directory):
 
 def check_key(directory, supplied):
     """True when the request may proceed: no key configured, or a match.
-
-    Timing-safe comparison; an empty `supplied` against a configured key is
-    rejected without touching the digest.
-    """
+    Timing-safe compare; an empty supplied value never touches the digest."""
     expected = get_api_key(directory)
     if not expected:
         return True
@@ -135,11 +115,8 @@ def _set_positive_int(directory, field, value):
 
 
 def reserve_credits(directory):
-    """Global low-credit guard: an account at or below this balance stays idle.
-
-    Zero disables the guard, which keeps installs that predate the setting
-    behaving exactly as before.
-    """
+    """Global low-credit guard: accounts at or below this balance stay idle.
+    Zero disables the guard, as on installs that predate the setting."""
     return _positive_int(directory, "reserve_credits")
 
 
@@ -149,12 +126,8 @@ def set_reserve_credits(directory, value):
 
 
 def daily_token_limit(directory):
-    """Global daily guard: an account that already burned this many tokens
-    today stays idle until local midnight.
-
-    Zero disables the guard, which keeps installs that predate the setting
-    behaving exactly as before.
-    """
+    """Global daily guard: an account burning this many tokens stays idle.
+    Zero disables the guard, as on installs that predate the setting."""
     return _positive_int(directory, "daily_token_limit")
 
 
@@ -165,12 +138,7 @@ def set_daily_token_limit(directory, value):
 
 def auto_switch_product(directory):
     """Whether an upstream 429 may rotate an account's outbound identity.
-
-    Off unless the operator turns it on. Rotating identity spends the request's
-    retry budget and leaves the account on a channel nobody picked, so the
-    gateway does not decide that on its own - and an install that predates the
-    setting keeps behaving exactly as it did.
-    """
+    Off by default; rotation spends the retry budget on an unchosen channel."""
     return load(directory).get("auto_switch_product") is True
 
 
@@ -185,13 +153,7 @@ def set_auto_switch_product(directory, enabled):
 
 def daily_chat_web(directory):
     """Whether the intl daily check-in also opens a web-channel conversation.
-
-    On unless the operator turns it off: the desktop-identity chat completion
-    this automation used to send does not register the daily activity, while a
-    web conversation does (issues #75, #59, #90). An install that never touched
-    the setting keeps the web step, because that is the behaviour that earns
-    the credits.
-    """
+    On by default: only a web conversation registers the daily activity."""
     value = load(directory).get("daily_chat_web")
     return True if value is None else value is True
 
@@ -207,14 +169,7 @@ def set_daily_chat_web(directory, enabled):
 
 def local_web_tools(directory):
     """Whether the gateway runs web_search / web_fetch calls itself.
-
-    Off unless the operator turns it on. Forwarding the client's declaration
-    untouched is what this gateway has done since the hub's v1.5.3 revert, and
-    it is what an install that never touched the switch keeps doing. Turning
-    the switch on swaps the declaration for the gateway's own function and
-    executes the calls locally (gateway.webtools), which also means the gateway
-    itself fetches the URLs a model asks for - hence opt-in only.
-    """
+    Off by default: enabling it makes the gateway fetch URLs models ask for."""
     return load(directory).get("local_web_tools") is True
 
 
@@ -228,15 +183,8 @@ def set_local_web_tools(directory, enabled):
 
 
 def upstream_timeouts(directory):
-    """(header, idle) seconds for the chat upstream socket (hub #148).
-
-    header covers connect/TLS/first byte; idle bounds each mid-stream read,
-    so an active stream stays alive while a silent one fails out early and
-    releases its concurrency slot. Defaults match the hub (120s/300s) and the
-    key layout matches the hub's `upstream` group, so a settings.json stays
-    compatible with a hub install. An entry that never touched the setting
-    behaves exactly like before.
-    """
+    """(header, idle) seconds for the chat upstream socket.
+    Defaults 120s/300s; the key layout matches the hub's `upstream` group."""
     cfg = load(directory).get("upstream")
     cfg = cfg if isinstance(cfg, dict) else {}
     header, idle = 120.0, 300.0
@@ -264,12 +212,8 @@ def set_upstream_timeouts(directory, header_seconds, idle_seconds):
 
 
 def prompt_config(directory):
-    """Gateway system-prompt mode (hub #160; default passthrough = old behaviour).
-
-    mode: passthrough | custom | append; file: path to the gateway prompt text
-    (empty = built-in default). Any garbage falls back to the defaults so a
-    hand-edited settings.json cannot alter outbound traffic by accident.
-    """
+    """Gateway system-prompt mode (default passthrough).
+    mode: passthrough|custom|append; an empty file means the built-in prompt."""
     stored = load(directory).get("prompt")
     stored = stored if isinstance(stored, dict) else {}
     mode = stored.get("mode")
@@ -300,13 +244,8 @@ def set_prompt_config(directory, mode=None, file=None):
 
 
 def expiring_window_days(directory):
-    """Window, in days, inside which an account's soonest-expiring credit
-    package makes the pool hand that account out first, so credits about to
-    lapse are spent before they are lost (hub #174).
-
-    The shipped default is 7 days; 0 disables the preference and dispatch
-    stays a plain round-robin.
-    """
+    """Days inside which soonest-expiring credits make an account go first.
+    Default 7; 0 disables the preference and dispatch stays round-robin."""
     try:
         value = int(load(directory).get("expiring_window_days"))
     except (TypeError, ValueError):
@@ -327,14 +266,8 @@ def set_expiring_window_days(directory, value):
 
 
 def credits_refresh_hours(directory):
-    """How stale a credit balance may get before the background refresher
-    updates it, in hours (hub #174/#163 support).
-
-    The dispatch preference reads the balance, and only the check-in /
-    daily-activity paths used to refresh it, so an account could be judged on
-    a balance days old. Zero disables the refresher; garbage falls back to
-    the default so a hand-edited settings.json cannot wedge the loop.
-    """
+    """Hours a credit balance may go stale before the refresher updates it.
+    Zero disables the refresher; garbage falls back to the default."""
     raw = load(directory).get("credits_refresh_hours")
     if raw is None:
         return 12.0

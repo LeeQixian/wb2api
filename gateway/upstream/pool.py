@@ -57,17 +57,11 @@ def _idle_ttl():
 
 
 class PoolBypass(Exception):
-    """This request must not pool; the caller falls back to urllib.
-
-    Raised before sending (unsupported URL/proxy) or on a 3xx to follow.
-    """
+    """This request must not pool; the caller falls back to urllib."""
 
 
 class _StaleConnection(Exception):
-    """A pooled connection was closed by the peer before any bytes arrived.
-
-    Safe to retry once; `original` is re-raised if the retry also fails.
-    """
+    """A pooled connection closed by the peer before any byte arrived."""
 
     def __init__(self, original):
         Exception.__init__(self, str(original))
@@ -83,10 +77,7 @@ class _TransportFailure(Exception):
 
 
 def _stale_connection_error(exc):
-    """True for connection-level failures: write errors or EOF before any byte.
-
-    Timeouts are NOT stale (the peer is alive); the caller decides retries.
-    """
+    """True for connection-level failures: write errors or EOF before any byte."""
     if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
         return True
     if isinstance(exc, ssl.SSLEOFError):
@@ -100,11 +91,7 @@ def _stale_connection_error(exc):
 
 def _connection_looks_alive(conn):
     """True if an idle connection is still clean and reusable.
-
-    Probe by non-blocking recv(1): BlockingIOError/SSLWantReadError means idle
-    and clean; EOF, errors or readable bytes mean discard. Check TLS pending()
-    first. Never call select.
-    """
+    Probe with non-blocking recv(1): readable bytes or errors mean discard."""
     sock = getattr(conn, "sock", None)
     if sock is None:
         return False
@@ -127,12 +114,7 @@ def _connection_looks_alive(conn):
 
 class _PooledResponse(http.client.HTTPResponse):
     """HTTPResponse that returns its connection to the pool when done.
-
-    Release happens on natural completion (Content-Length drained, chunked
-    terminator, bodyless HEAD), which is earlier and more reliable than
-    close(). A mid-stream close follows the same path but is rejected for
-    reuse. Reuse is decided by "read to the natural end", never by isclosed().
-    """
+    Release follows natural completion, not isclosed(); mid-stream closes drop."""
     _pool = None          # the next three are set by _exchange() after getresponse()
     _pool_key = None
     _pool_conn = None
@@ -140,9 +122,8 @@ class _PooledResponse(http.client.HTTPResponse):
     _chunked_done = False
 
     def _read_and_discard_trailer(self):
-        # After the zero-length chunk, http.client reads the trailer then calls
-        # _close_conn(); record "chunked reached its end" before that call so
-        # _release() can trust it. Do not set it when the trailer read fails.
+        # Record "chunked reached its end" before http.client closes the
+        # connection, so _release() can trust it.
         http.client.HTTPResponse._read_and_discard_trailer(self)
         self._chunked_done = True
 
@@ -253,11 +234,7 @@ class _KeepAlivePool(object):
 
     def _sweep_locked(self, now):
         """Close idle connections past their TTL across every key.
-
-        Sweep all keys, not just the touched one: an orphan key would otherwise
-        hold its socket until process exit. Key count is tiny, so this is cheap.
-        Caller must hold self._lock.
-        """
+        Sweep all keys, or an orphan socket lives until exit. Caller holds _lock."""
         ttl = _idle_ttl()
         for key in list(self._idle):
             alive = []
@@ -323,9 +300,7 @@ def close_all():
     _POOL.close_all()
 
 
-# ---------------------------------------------------------------------------
-# Request orchestration: translate urllib.Request into one http.client exchange.
-# ---------------------------------------------------------------------------
+# --- Request orchestration: urllib.Request -> one http.client exchange. -----
 
 def _target_parts(url):
     """Split URL into (scheme, host, port, selector); selector matches urllib."""
@@ -342,11 +317,7 @@ def _target_parts(url):
 
 def _split_proxy(proxy):
     """Parse a proxy string into dict(scheme, user, password, host, port).
-
-    Matches urllib.request._parse_proxy for http://user:pass@host:port and the
-    authority form host:port. Returns None for non-HTTP proxies (socks5:// etc),
-    which the caller then routes back to urllib.
-    """
+    None for non-HTTP proxies (socks5://), which urllib then handles."""
     raw = str(proxy or "").strip()
     if not raw:
         return None
@@ -383,10 +354,7 @@ def _split_proxy(proxy):
 
 def _proxy_auth_header(proxy_info):
     """Proxy-Authorization value, or "" when there are no credentials.
-
-    Matches urllib: send only when both user and password are non-empty, and
-    URL-decode the userinfo first.
-    """
+    Sent only when user and password are non-empty after URL-decoding."""
     if not proxy_info or not proxy_info.get("user") or not proxy_info.get("password"):
         return ""
     creds = "%s:%s" % (proxy_info["user"], proxy_info["password"])
@@ -395,11 +363,7 @@ def _proxy_auth_header(proxy_info):
 
 def _proxy_bypassed(host):
     """True when the host is on the system proxy bypass list.
-
-    Mirrors urllib ProxyHandler.proxy_bypass (Windows ProxyOverride, Linux
-    no_proxy). A bypassed host is treated as direct and keyed to the direct
-    pool, sharing it with accounts that configure no proxy.
-    """
+    Mirrors urllib proxy_bypass (Windows ProxyOverride, Linux no_proxy)."""
     try:
         return bool(urllib.request.proxy_bypass(host))
     except Exception:
@@ -408,11 +372,7 @@ def _proxy_bypassed(host):
 
 def _new_connection(scheme, host, port, proxy_info, timeout):
     """Build an unconnected client; http.client connects lazily.
-
-    Direct: HTTPSConnection (default context, same checks as urllib). Via an
-    HTTP proxy: connect to the proxy address; HTTPS uses a CONNECT tunnel,
-    HTTP sends the absolute URL as the request target.
-    """
+    Direct uses HTTPSConnection, proxies use CONNECT (HTTPS) or absolute URLs."""
     if proxy_info:
         # Default ports follow urllib: 443 for HTTPS, 80 for HTTP when the
         # proxy string omits one.
@@ -443,11 +403,7 @@ def _host_header_value(url):
 
 def _request_headers(req, scheme, proxy_info):
     """Build request headers the way urllib do_open does.
-
-    Only difference: Connection: keep-alive instead of close. Header names and
-    order match do_open (unredirected side first, then caller headers, then
-    Connection) so the wire bytes are identical apart from that value.
-    """
+    Only difference: Connection: keep-alive instead of close; order matches."""
     headers = dict(req.unredirected_hdrs)
     data = req.data
     if data is not None:
@@ -472,12 +428,8 @@ def _request_headers(req, scheme, proxy_info):
 
 
 def _exchange(conn, req, selector, scheme, proxy_info, key, reused):
-    """Run one request/response exchange; return a release-aware response.
-
-    Raises _StaleConnection (pooled connection closed by peer, retry once),
-    _TransportFailure (other transport failure; `original` is re-raised), or
-    any other exception, leaving the connection untrusted for the caller.
-    """
+    """Run one request/response exchange; returns a release-aware response.
+    Raises _StaleConnection (retry once), _TransportFailure, or other errors."""
     method = req.get_method()
     headers = _request_headers(req, scheme, proxy_info)
     try:
@@ -514,10 +466,7 @@ def _read_error_body(resp):
 
 def _fold_bypassed(host, proxy_raw):
     """Collapse a bypassed proxy to direct; return (proxy_info, proxy_raw).
-
-    Non-HTTP proxies raise PoolBypass so the caller reuses urllib. The bypass
-    check matches urllib ProxyHandler.
-    """
+    Non-HTTP proxies raise PoolBypass so the caller reuses urllib."""
     proxy_info = _split_proxy(proxy_raw)
     if proxy_raw and proxy_info is None:
         raise PoolBypass("proxy %r is not an http proxy" % (proxy_raw,))
@@ -526,13 +475,8 @@ def _fold_bypassed(host, proxy_raw):
     return proxy_info, proxy_raw
 
 def egress_key(url, proxy=""):
-    """Stable id of an outbound path: accounts on one physical exit share a key.
-
-    Same shape as the pool key -- (scheme, host, port, proxy) -- with a
-    bypassed proxy collapsed to direct. Failure accounting groups by this key
-    so accounts sharing an exit share one counter. Non-HTTP proxies key by the
-    raw string (they do not pool, but the exit identity is that string).
-    """
+    """Stable id of an outbound path: one physical exit shares a key.
+    Failure accounting groups by it, so accounts on one exit share a counter."""
     scheme, host, port, _selector = _target_parts(url)
     proxy_raw = str(proxy or "").strip()
     try:
@@ -543,16 +487,7 @@ def egress_key(url, proxy=""):
 
 def urlopen(req, timeout=30, proxy=""):
     """Pooled urlopen; signature matches gateway.accounts.urlopen.
-
-    Failure semantics match urllib: HTTP >= 400 raises HTTPError (body drained
-    onto a BytesIO), send-stage OSError raises URLError, other http.client
-    errors propagate as-is.
-
-    Retry once -- and only for this failure -- when a pooled connection was
-    closed by the peer. Safe boundary: no request body sent and no response
-    byte read, so the peer cannot have processed a full request; that makes a
-    retry free of double billing or duplicated tool calls.
-    """
+    Retries once when a pooled connection was peer-closed (nothing was sent)."""
     scheme, host, port, selector = _target_parts(req.full_url)
     proxy_raw = str(proxy or "").strip()
     # A bypassed host is direct (its key is the direct pool), matching urllib.

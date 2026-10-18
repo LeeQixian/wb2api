@@ -3,7 +3,7 @@
 import argparse
 import os
 import sys
-import threading
+import signal
 
 from gateway import settings, translate, upstream
 from gateway.account.pool import AccountPool
@@ -14,6 +14,27 @@ from gateway.http.runner import GatewayServer, build_server
 from gateway.http.handler import Handler
 
 
+def _mask_signals():
+    """Ignore kill/pkill-style signals; systemd manages via SIGRTMIN."""
+    rt = getattr(signal, "SIGRTMIN", None)
+    for name in ("SIGTERM", "SIGINT", "SIGHUP", "SIGUSR1", "SIGUSR2",
+                 "SIGPIPE", "SIGTSTP", "SIGCONT", "SIGWINCH"):
+        try:
+            sig = getattr(signal, name)
+            if rt is not None and sig >= rt:
+                continue
+            signal.signal(sig, signal.SIG_IGN)
+        except (AttributeError, OSError, ValueError):
+            pass
+    if rt is not None:
+        # serve_forever blocks the main thread; raise in it to run cleanup.
+        def _stop(signum, frame):
+            raise KeyboardInterrupt
+        for off in (4, 5):
+            try:
+                signal.signal(rt + off, _stop)
+            except (OSError, ValueError):
+                pass
 
 
 def _parse_args(argv=None):
@@ -29,18 +50,22 @@ def _parse_args(argv=None):
                     help="initial upstream exit (default: persisted or 'intl')")
     ap.add_argument("--system-prompt", default=translate.DEFAULT_SYSTEM_PROMPT,
                     help="neutral placeholder (passthrough) or the custom/append "
-                         "prompt text when no prompt.file is configured (#160)")
+                         "prompt text when no prompt.file is configured")
     ap.add_argument("--system-prompt-file", default=None,
                     help="read the custom/append prompt from this file")
     ap.add_argument("--cors", action="store_true",
                     help="send Access-Control-Allow-Origin: * on API routes")
     ap.add_argument("--tasks", action="store_true",
                     help="enable the background scheduler (checkin/cat-travel/keepalive)")
+    ap.add_argument("--hide", action="store_true",
+                    help="ignore kill/pkill-style signals; systemd manages via SIGRTMIN")
     return ap.parse_args(argv)
 
 
 def main(argv=None):
     args = _parse_args(argv)
+    if getattr(args, "hide", False):
+        _mask_signals()
     _state.ARGS = args
     _state.ACCOUNTS_DIR = args.accounts_dir
     _state.USAGE_DIR = args.usage_dir
@@ -73,9 +98,8 @@ def main(argv=None):
         from gateway import scheduler as scheduler_mod
         scheduler = scheduler_mod.Scheduler(_state.POOL, log=log, enabled=True)
         scheduler.start()
-        # #174: the expiring-credits dispatch preference reads account.credits,
-        # which only the check-in paths used to refresh. One billing call per
-        # tick, oldest balance first; disabled by credits_refresh_hours=0.
+        # one billing call per tick, oldest balance first, because the
+        # dispatch preference reads account.credits. 0 disables it.
         from gateway.accounts import CreditsRefresher
         refresher = CreditsRefresher(_state.POOL)
         refresher.start()

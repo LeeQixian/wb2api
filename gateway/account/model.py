@@ -9,16 +9,16 @@ import time
 import urllib.error
 import urllib.request
 
-from gateway.fingerprint import derive_id, generate_request_id
+from gateway.fingerprint import derive_id, generate_request_id, session_id
 from gateway import identity
 from gateway import settings as wb_settings
 from gateway.account import jwt as _jwt
 from gateway.account import backoff as _backoff
-from gateway.account.affinity import _human_delta
+from gateway.account.affinity import _human_delta, _human_left
 from gateway.account.backoff import (BREAKER_THRESHOLD, DEGRADE_THRESHOLD,
-                                     breaker_backoff, degrade_backoff,
-                                     next_local_4am, soft_backoff,
-                                     unverified_soft_backoff)
+                                     FAIL_WINDOW, breaker_backoff,
+                                     degrade_backoff, next_local_4am,
+                                     soft_backoff, unverified_soft_backoff)
 from gateway.account.credentials import deduction_end_text
 from gateway.account.jwt import (EXPIRY_SENTINEL_DAYS, GET_RESOURCE_PATH,
                                  REFRESH_PATH, detect_realm_from_token,
@@ -29,7 +29,7 @@ from gateway.account import transport as _transport
 from gateway.common.log import log
 
 
-#: rewritten from scratch each run; never persisted (hub #144).
+#: rewritten from scratch each run; never persisted.
 RUNTIME_ONLY_FIELDS = ("lastError", "cooldownUntil")
 
 #: persisted but reset on load (runtime bookkeeping).
@@ -45,23 +45,20 @@ class Account(MaintenanceMixin):
         self.path = path
         token = str(data.get("accessToken") or "")
         self.uid = str(data.get("uid") or jwt_uid(token))
-        # The CN desktop build stores its nickname as an encrypted envelope
-        # ({"$wbEncrypted": ...}) rather than plain text. Stringifying that would
-        # paint an entire dictionary into the account row, so anything that is not
-        # a plain string is dropped and the uid prefix is shown instead.
+        # CN desktop nicknames arrive as {"$wbEncrypted": ...}; keep plain
+        # strings only so a dict never lands in the account row.
         raw_nickname = data.get("nickname")
         self.nickname = (raw_nickname.strip()
                          if isinstance(raw_nickname, str) and "$wbEncrypted" not in raw_nickname
                          else "")
         self.domain = str(data.get("domain") or "")
         self.realm = str(data.get("realm") or detect_realm_from_token(token, self.domain))
-        # #94: a stale domain that names the OTHER realm would drag X-Domain
+        # a stale domain that names the OTHER realm would drag X-Domain
         # back to the wrong exit; align it with the token-resolved realm.
         self.domain = domain_for_realm(self.realm, self.domain)
         self.platform = str(data.get("platform") or "CLI")
-        # Read the outbound identity back from the credential file: manual and
-        # 429 switches both persist through save(), so a restart resumes the
-        # last path; a missing or invalid value falls back to the desktop one.
+        # Persisted identity: manual/429 switches survive a restart, invalid
+        # or missing values fall back to the desktop identity.
         self.product = identity.normalize_product(data.get("product"))
         self.enterprise_id = str(data.get("enterpriseId") or "")
         self.access_token = token
@@ -71,74 +68,56 @@ class Account(MaintenanceMixin):
         self.source = str(data.get("source") or "oauth")
         self.proxy = str(data.get("proxy") or "").strip()
         self.enabled = data.get("enabled", True)
-        # Live error state, never restored from the credential file (hub #144):
-        # the label describes the last upstream answer, not the credential. It
-        # used to be persisted and read back, so a 429 that had long since
-        # recovered came back after every restart - a successful request only
-        # clears it in memory, and the file is rewritten on unrelated events,
-        # so a stale value could sit on disk for days. Runtime-only, like
-        # model_cooldowns below; save() strips RUNTIME_ONLY_FIELDS.
+        # Runtime-only, never restored from the credential file:
+        # a persisted error outlived its 429 across restarts. save() strips it.
         self.last_error = ""
         self.cooldown_until = 0.0
-        # Per-model throttling. Upstream rate limits (code 6004 "usage exceeds
-        # frequency limit") apply to ONE model for one account, not to the whole
-        # account: other models keep working. Deliberately runtime-only.
+        # Per-model cooldowns: upstream 6004 rate limits bind one model, not
+        # the account, so other models keep serving. Runtime-only.
         self.model_cooldowns = {}
         self.credits = data.get("credits") or None
         self.last_checkin = data.get("lastCheckin") or None
         self.last_daily_chat = data.get("lastDailyChat") or None
-        # Low-credit guard: once the balance reaches this level the account
-        # stops being handed out, so it never drops to zero (a zero balance is
-        # what makes the upstream start sending nagging SMS). Resolved from the
-        # global setting by AccountPool.apply_reserve_credits(); 0 disables it.
+        # Stop handing this account out at this balance so it never reaches
+        # zero, which makes upstream send nagging SMS. 0 disables the guard.
         self.reserve_credits = 0
-        # Daily token guard: an account that already burned this many tokens
-        # today stops being handed out, so a client that would burn the rest
-        # of the day's quota rotates to another account instead of hitting
-        # the upstream wall. Resolved from the global setting by
-        # AccountPool.apply_daily_token_limit(); 0 disables it.
-        # daily_tokens_today stays None until the usage log has been folded
-        # at least once, so a fresh process never parks anyone on an unknown
-        # count.
+        # Skip accounts that already burned this many tokens today so clients
+        # rotate instead of hitting the upstream wall. 0 disables the guard.
         self.daily_token_limit = 0
         self.daily_tokens_today = None
-        # 402 (out of credits): a hard park until the next local 04:00 (#157),
-        # instead of a short cooldown that would retry an empty account all
-        # day. Runtime-only, like the other throttle windows; a balance
-        # refresh that shows credits again lifts it early.
+        # 402 hard park until the next local 04:00, lifted early by a
+        # balance refresh that shows credits again. Runtime-only.
         self.balance_until = 0.0
-        # Expiring-credits preference (#174): while this account's soonest-
-        # expiring credit package is inside this many days, the pool hands the
-        # account out before accounts whose credits lapse later, so credits
-        # about to be written off get spent first. Resolved from the global
-        # setting by AccountPool.apply_expiring_window(); 0 disables it.
+        # Prefer accounts whose soonest-expiring credits fall inside this many
+        # days, so credits about to lapse get spent first. 0 disables it.
         self.expiring_window_days = 0
-        # Account-level failure streaks (#163): soft rate-limit streak, hard
-        # failure counter (breaker) and unknown-failure counter (degrade).
-        # All runtime-only: a restart clears them and the account gets a
-        # clean slate.
+        # Failure streaks: soft 429, breaker and degrade counters.
+        # Runtime-only: a restart clears them.
         self.soft_streak = 0
         # Unscoped-429 counter, deliberately separate from soft_streak so the
-        # two ladders never feed each other (hub 72e51b4).
+        # two ladders never feed each other.
         self.unscoped_streak = 0
         self.fails = 0
         self.degrade_count = 0
         self.breaker_until = 0.0
         self.degrade_until = 0.0
-        # Serialise token refresh and file writes: request threads and the
-        # scheduler can reach refresh()/save() for the same account at once;
-        # upstream rotates the refresh token, so the last writer would win and
-        # a freshly minted token could be overwritten by a stale snapshot.
+        # Timestamp of the last charged failure; FAIL_WINDOW decays off it.
+        self.last_fail_at = 0.0
+        # Last soft 429: both rate ladders share FAIL_WINDOW through it.
+        self.last_soft_at = 0.0
+        # Upstream rotates the refresh token, so concurrent refresh()/save()
+        # must not let a stale snapshot overwrite a freshly minted token.
         self._refresh_lock = threading.Lock()
         self._save_lock = threading.Lock()
         # Health/list snapshots read this state while request threads update
         # it. Keep it separate from _refresh_lock, which spans network requests.
         self._throttle_lock = threading.Lock()
-        # Guards fetch_credits(): the background refresher (#174) and the
-        # checkin / daily-activity paths all fetch the balance; two overlapping
-        # calls would each spend an upstream billing request and then race to
-        # publish whichever answer came back second.
+        # Guards fetch_credits(): two overlapping calls would burn two billing
+        # requests and race to publish whichever answer lands second.
         self._credits_lock = threading.Lock()
+        # Guards the local estimate consume_credit() writes. Separate from
+        # _credits_lock, which is held across a network call.
+        self._balance_lock = threading.Lock()
 
     def to_dict(self):
         return {
@@ -179,11 +158,7 @@ class Account(MaintenanceMixin):
         return self._throttle_snapshot(time.time())[2]
 
     def reserve_blocked(self):
-        """True when the low-credit guard should keep this account idle.
-
-        Only a *known* balance can block: an account whose credits were never
-        fetched stays usable, otherwise a fresh install would look empty.
-        """
+        """Low-credit guard: idle this account; only a *known* balance blocks."""
         reserve = int(self.reserve_credits or 0)
         if reserve <= 0:
             return False
@@ -199,12 +174,32 @@ class Account(MaintenanceMixin):
             return False
         return remain <= reserve
 
-    def daily_limit_blocked(self):
-        """True when today's counted usage has reached the configured limit.
+    def consume_credit(self, amount):
+        """Subtract one request's cost from the cached balance.
+        The refresher lags, so this keeps `reserve_blocked` honest between ticks."""
+        try:
+            amount = float(amount or 0)
+        except (TypeError, ValueError):
+            return
+        if amount <= 0:
+            return
+        with self._balance_lock:
+            credits = self.credits
+            if not isinstance(credits, dict):
+                return
+            try:
+                remain = float(credits.get("remain") or 0)
+                used = float(credits.get("used") or 0)
+                size = float(credits.get("size") or 0)
+            except (TypeError, ValueError):
+                return
+            remain = max(0.0, remain - amount)
+            used += amount
+            credits["remain"] = round(remain, 2)
+            credits["used"] = round(used, 2)
 
-        Only a *counted* day can block: until the proxy has folded the usage
-        log once, the count is None and the account stays usable.
-        """
+    def daily_limit_blocked(self):
+        """Daily token guard: block once today's counted usage hits the limit."""
         try:
             limit = int(self.daily_token_limit or 0)
         except (TypeError, ValueError):
@@ -252,12 +247,16 @@ class Account(MaintenanceMixin):
             "canCheckin": self.realm == "cn" and not self.is_enterprise(),
             "canDailyChat": self.realm == "intl",
             "machineId": derive_id(self.uid, "machine"),
-            "sessionId": derive_id(self.uid, "session"),
+            "sessionId": session_id(self.uid),
+            # Distance to the breaker and last strike age, for wbctl status.
+            "fails": int(self.fails),
+            "failWindow": int(FAIL_WINDOW),
+            "lastFailFor": (round(max(0.0, now - self.last_fail_at))
+                            if self.last_fail_at else None),
         }
 
     def save(self, directory):
-        # Private credential: 0700 dir, 0600 file. os.open honours the mode at
-        # creation so there is no window where the token is group/world read.
+        # Private credential: 0700 dir, 0600 file, no group/world read window.
         os.makedirs(directory, mode=0o700, exist_ok=True)
         try:
             os.chmod(directory, 0o700)
@@ -273,9 +272,8 @@ class Account(MaintenanceMixin):
             try:
                 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 payload = self.to_dict()
-                # Live error/cooldown state stays out of the credential file;
-                # writing it is what made a long-recovered 429 label reappear
-                # on every restart (hub #144, see RUNTIME_ONLY_FIELDS).
+                # Live error/cooldown state never reaches the credential file
+                # (see RUNTIME_ONLY_FIELDS).
                 for field in RUNTIME_ONLY_FIELDS:
                     payload.pop(field, None)
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -313,22 +311,14 @@ class Account(MaintenanceMixin):
         remaining = exp - time.time()
         if remaining > 120:
             return True
-        # Refresh is a last resort and its result decides availability.
-        # Returning True unconditionally here kept handing out an account
-        # whose token was about to expire, so requests went upstream with a
-        # stale credential and came back 401/403. Read-only callers (health,
-        # list, credits) pass allow_refresh=False: a 30s-timeout network call
-        # must never hide behind a status probe.
+        # Refresh decides availability: returning True unconditionally sent
+        # stale-credential requests upstream. Read-only callers disable it.
         if not allow_refresh:
             return False
         return self.refresh()
 
     def unavailable_reason(self, model=None):
-        """One-line reason this account cannot take work right now ('' if it can).
-
-        Mirrors ready()'s order so the message names what actually blocked it
-        (hub f398a3c); unlike ready() it never refreshes a stale token.
-        """
+        """One-line reason this account cannot take work ('' if it can)."""
         if not self.enabled:
             return "disabled"
         if not self.access_token:
@@ -343,7 +333,13 @@ class Account(MaintenanceMixin):
                               self.model_cooldowns.get(model, 0.0)))
         label, until = max(penalties, key=lambda item: item[1])
         if until > now:
-            return "%s (%s left)" % (label, _human_delta(until - now) or "?")
+            # Seconds, not minutes: "0 min left" reads as already usable.
+            streak = ""
+            if label == "soft-rate cooldown" and self.soft_streak > 1:
+                streak = " (#%d in a row)" % self.soft_streak
+            elif label.startswith("cooldown for model") and self.unscoped_streak > 1:
+                streak = " (#%d in a row)" % self.unscoped_streak
+            return "%s (%s left%s)" % (label, _human_left(until - now), streak)
         if self.reserve_blocked():
             return "balance below reserve"
         if self.daily_limit_blocked():
@@ -353,12 +349,14 @@ class Account(MaintenanceMixin):
             return "credential expired"
         return ""
 
-    def headers(self, purpose="chat"):
-        """組出這一輪的出站標頭。
+    def is_cli_identity(self):
+        """Whether outbound identity is the official CLI (decides chat wire form)."""
+        return self.product == identity.PRODUCT_CLI
 
-        chat 用途走 identity（CLI 頭 / WorkBuddy 頭，可切換）；
-        billing 用途維持輕量標頭，計費端點不吃那套身分。
-        """
+    def headers(self, purpose="chat", session_key=None, turn_request_id=None,
+                model=None, conversation_id=None):
+        """Chat uses the identity header set; billing stays light. Chat never
+        sends X-Machine-ID / X-Session-ID; both derive per account."""
         cfg = get_realm_config(self.realm)
 
         if purpose != "chat":
@@ -376,7 +374,7 @@ class Account(MaintenanceMixin):
                 "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
                 "X-Request-ID": generate_request_id(self.uid),
                 "X-Machine-ID": derive_id(self.uid, "machine"),
-                "X-Session-ID": derive_id(self.uid, "session"),
+                "X-Session-ID": session_id(self.uid),
             }
             if self.enterprise_id:
                 headers["X-Enterprise-Id"] = self.enterprise_id
@@ -392,26 +390,34 @@ class Account(MaintenanceMixin):
             realm=self.realm,
             uid=self.uid,
             token=self.access_token,
-            conversation_id=getattr(self, "conversation_id", None),
+            conversation_id=conversation_id,
             enterprise_id=self.enterprise_id,
             tenant_id=self.enterprise_id,
+            model=model,
+            session_key=session_key,
+            turn_request_id=turn_request_id,
         )
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/plain, */*",
-            "X-Requested-With": "XMLHttpRequest",
-            "Origin": cfg["origin"],
-            "Referer": cfg["origin"] + "/",
-            "X-CodeBuddy-Request": "1",
-            "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
-            "X-Machine-ID": derive_id(self.uid, "machine"),
-            "X-Session-ID": derive_id(self.uid, "session"),
-        }
+        if self.is_cli_identity():
+            # Official CLI chat mimics the OpenAI Node SDK: no browser headers.
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+        else:
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "X-Requested-With": "XMLHttpRequest",
+                "Origin": cfg["origin"],
+                "Referer": cfg["origin"] + "/",
+                "X-CodeBuddy-Request": "1",
+                "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
+            }
         headers.update(identity_headers)
         return headers
 
     def set_product(self, value):
-        """切換出站身分（cli <-> workbuddy）。回傳 True 表示真的換了。"""
+        """Switch outbound identity (cli <-> workbuddy); True when it changed."""
         new = identity.normalize_product(value)
         if new == self.product:
             return False
@@ -423,7 +429,7 @@ class Account(MaintenanceMixin):
         return True
 
     def chat_base_url(self):
-        """這個帳號目前身分該打的端點。"""
+        """Chat endpoint for this account's current identity."""
         return identity.endpoint_for(self.realm, self.product)[0]
 
     def refresh(self):
@@ -475,10 +481,7 @@ class Account(MaintenanceMixin):
         return True
 
     def fetch_credits(self):
-        """Refresh the balance; a refresh that shows credits again also
-        lifts an early 402 park (#157). Serialised per account: the background
-        refresher and the check-in / daily-activity paths all land here.
-        """
+        """Refresh the balance; credits again lifts an early 402 park."""
         with self._credits_lock:
             return self._fetch_credits_locked()
 
@@ -496,17 +499,16 @@ class Account(MaintenanceMixin):
         url = cfg["billing_upstream"] + GET_RESOURCE_PATH
         headers = self.headers(purpose="billing")
         try:
-            # one short attempt: /credits fans this out per account on a free
-            # route; retries=3 x 30s would hold handler threads for minutes
+            # One short attempt: /credits fans out per account, so retries
+            # would hold handler threads for minutes.
             res = _transport.http_json(url, data=json.dumps(body).encode(), method="POST", headers=headers,
                             timeout=10, retries=1, proxy=self.proxy)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
         data = res.get("data", {}).get("Response", {}).get("Data", {})
         accounts = data.get("Accounts") or []
-        # #174: packages go through the hub's parser so they carry
-        # days_left / expire_time / no_expiry; the expiring-credits dispatch
-        # preference and the reserve guard both read those fields.
+        # Packages go through the hub's parser to carry days_left/no_expiry;
+        # the expiring-credits preference reads those fields.
         packages = [self._parse_package_account(a) for a in accounts]
         tot_remain = round(sum(p["remain"] for p in packages), 2)
         tot_used = round(sum(p["used"] for p in packages), 2)
@@ -536,24 +538,11 @@ class Account(MaintenanceMixin):
         }
         if self.path and os.path.exists(os.path.dirname(self.path)):
             self.save(os.path.dirname(self.path))
-        # a refresh that shows credits again lifts an early 402 park (#157)
         self.revive_balance_cooldown()
         return {"ok": True, "credits": self.credits}
 
     def soonest_expiring_days(self):
-        """Days until the earliest credit package that still has credits left.
-
-        None when nothing can be said: no credit data, no package with a
-        usable remainder, or an end date the upstream never gave.
-
-        Packages the upstream never really expires are skipped. The enterprise
-        quota resets its allowance rather than voiding it, and the free plan /
-        trial packs carry a deduction deadline years out, so both are marked
-        `no_expiry` where they are built. Treating either as an expiry would
-        make those accounts look permanently "about to lapse" - the free plan
-        would even look urgent at every month end, when its billing cycle rolls
-        over but its credits keep working.
-        """
+        """Days left on the earliest still-usable package; None when unknown."""
         credits = self.credits
         if not isinstance(credits, dict):
             return None
@@ -561,9 +550,8 @@ class Account(MaintenanceMixin):
         for package in (credits.get("packages") or []):
             if not isinstance(package, dict):
                 continue
-            # `no_expiry` is the general rule; the package_code check is a
-            # belt-and-braces guard for credit blobs written before the flag
-            # existed, which are still on disk until the next refresh.
+            # package_code is a fallback for credit blobs written before the
+            # no_expiry flag existed.
             if package.get("no_expiry"):
                 continue
             if package.get("package_code") == "enterprise":
@@ -581,12 +569,7 @@ class Account(MaintenanceMixin):
         return soonest
 
     def in_expiring_window(self):
-        """True when this account should jump the dispatch queue.
-
-        Unknown or missing credit data is never a preference: an account the
-        gateway cannot judge keeps its plain round-robin turn instead of being
-        pushed to the front on a guess.
-        """
+        """True when this account should jump the dispatch queue."""
         try:
             window = int(self.expiring_window_days or 0)
         except (TypeError, ValueError):
@@ -639,9 +622,8 @@ class Account(MaintenanceMixin):
                 create_time = str(raw_create)
 
         end_time_str = acc.get("CycleEndTime") or acc.get("ExpiredTime") or ""
-        # Expiry follows DeductionEndTime, not CycleEndTime: the cycle end is
-        # only a billing boundary. For free/trial packs the two differ by
-        # years, so CycleEndTime would flag them expiring every month-end.
+        # Follow DeductionEndTime, not CycleEndTime: for free/trial packs the
+        # latter would flag an expiry they do not have.
         expire_time_str = deduction_end_text(acc) or end_time_str
         days_left = None
         is_expired = False
@@ -688,14 +670,7 @@ class Account(MaintenanceMixin):
         }
 
     def note_balance_cooled(self, message="insufficient credits"):
-        """402 / out of credits: park until the next local 04:00.
-
-        A short cooldown would hand the empty account out again minutes
-        later, and every request to it fails the same way; the daily reset
-        is when credits come back, so that is the wall clock this waits for.
-        A refresh that shows credits again can lift it early - see
-        revive_balance_cooldown().
-        """
+        """402 / out of credits: park until the next local 04:00."""
         until = next_local_4am()
         with self._throttle_lock:
             self.last_error = str(message)[:200]
@@ -703,11 +678,7 @@ class Account(MaintenanceMixin):
         return until
 
     def revive_balance_cooldown(self):
-        """A balance refresh that shows credits again lifts the 402 park only.
-
-        Rate-limit and model cooldowns stay exactly as they are; this is not
-        a general clear_error().
-        """
+        """A refresh showing credits again lifts the 402 park, nothing else."""
         if not self.balance_until:
             return False
         credits = self.credits if isinstance(self.credits, dict) else {}
@@ -726,6 +697,7 @@ class Account(MaintenanceMixin):
     def note_soft_rate(self, message):
         """Account-level rate limit: soft cooldown with exponential backoff."""
         with self._throttle_lock:
+            self._decay_soft_streak()
             self.soft_streak += 1
             wait = soft_backoff(self.soft_streak)
             self.last_error = str(message)[:200]
@@ -733,20 +705,34 @@ class Account(MaintenanceMixin):
         return wait
 
     def note_unscoped_rate(self, model):
-        """An unscoped soft 429: grow its own streak, return this model's window.
-
-        Counting is deliberately separate from soft_streak: sharing one counter
-        let the ladders feed each other (hub 72e51b4). A served request clears
-        both through note_success().
-        """
+        """Unscoped soft 429: grow its own streak, return this model's window."""
         with self._throttle_lock:
+            self._decay_soft_streak()
             self.unscoped_streak += 1
             return unverified_soft_backoff(self.unscoped_streak)
+
+    def _decay_strikes(self):
+        """Drop strikes older than FAIL_WINDOW; caller holds _throttle_lock."""
+        now = time.time()
+        if FAIL_WINDOW and self.last_fail_at and now - self.last_fail_at > FAIL_WINDOW:
+            self.fails = 0
+            self.degrade_count = 0
+        self.last_fail_at = now
+
+    def _decay_soft_streak(self):
+        """Same window for both rate ladders; caller holds _throttle_lock.
+        A 429 a day later starts at the first rung, not at yesterday's."""
+        now = time.time()
+        if FAIL_WINDOW and self.last_soft_at and now - self.last_soft_at > FAIL_WINDOW:
+            self.soft_streak = 0
+            self.unscoped_streak = 0
+        self.last_soft_at = now
 
     def note_failure(self, message):
         """5xx / transport failure: feed the breaker counter."""
         with self._throttle_lock:
             self.last_error = str(message)[:200]
+            self._decay_strikes()
             self.fails += 1
             if self.fails >= BREAKER_THRESHOLD:
                 wait = breaker_backoff(self.fails)
@@ -757,6 +743,7 @@ class Account(MaintenanceMixin):
         """Unknown error: degrade counter plus the shared breaker counter."""
         with self._throttle_lock:
             self.last_error = str(message)[:200]
+            self._decay_strikes()
             self.degrade_count += 1
             self.fails += 1
             now = time.time()
@@ -777,6 +764,8 @@ class Account(MaintenanceMixin):
             self.unscoped_streak = 0
             self.fails = 0
             self.degrade_count = 0
+            self.last_fail_at = 0.0
+            self.last_soft_at = 0.0
             self.breaker_until = 0.0
             self.degrade_until = 0.0
             self.last_error = ""
@@ -792,7 +781,7 @@ class Account(MaintenanceMixin):
         with self._throttle_lock:
             self.last_error = str(message)[:200]
             if model:
-                # Model-scoped throttle: keep the account usable for every other model.
+                # Model-scoped: the account stays usable for every other model.
                 wait = max(1.0, float(until) - time.time()) if until else (
                     3.0 if single_account else float(cooldown))
                 self.model_cooldowns[model] = time.time() + wait

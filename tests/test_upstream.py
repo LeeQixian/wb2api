@@ -1,9 +1,5 @@
 """Offline tests for gateway.upstream: rotation and throttle semantics.
-
-A scripted fake pool/upstream stands in for the network: each account has a
-list of outcomes (raise or return), and open_upstream() must classify them
-exactly like the source project does.
-"""
+A scripted fake pool stands in for the network; open_upstream classifies it."""
 import io
 import json
 import os
@@ -274,6 +270,34 @@ class Catalog(unittest.TestCase):
         self.assertNotIn("codewise-any", ids)
         # live metadata overlays the static entry
         self.assertEqual(dict(entries)["hy3"].get("name"), "live")
+
+    def test_free_sibling_drop_uses_live_ids_only(self):
+        # A retired free twin left in the bundled snapshot must not hide the
+        # paid model the live catalogue still serves.
+        live = ["hy4-preview"]
+        ids = up.curate_remote_catalog("intl", live)
+        self.assertIn("hy4-preview", ids)
+        both = up.curate_remote_catalog("intl", ["hy4-preview", "hy4-preview-f"])
+        self.assertNotIn("hy4-preview", both)
+
+    def test_stale_free_twin_skipped_in_merge(self):
+        # Bundled snapshot ships hy4-preview-f; the live catalogue now serves
+        # only the paid hy4-preview, so the free twin must not be offered.
+        entries = dict(up.merge_catalog([("hy4-preview", {"credits": "x0.29"})],
+                                        realm="intl"))
+        self.assertIn("hy4-preview", entries)
+        self.assertNotIn("hy4-preview-f", entries)
+        # Without the live paid model the bundled entry stays as it was.
+        self.assertIn("hy4-preview-f", dict(up.merge_catalog([], realm="intl")))
+
+    def test_glm_flash_is_forced_text_only(self):
+        e = up.model_entry("glm-5.3-flash", {"supportsImages": True})
+        self.assertFalse(e["capabilities"]["vision"])
+        self.assertIn("vision_note", e)
+        # The cn:/global: aliases are the same model and must match.
+        for alias in ("cn:glm-5.3-flash", "global:glm-5.3-flash"):
+            self.assertFalse(up.model_entry(alias, {"supportsImages": True})
+                             ["capabilities"]["vision"], alias)
 
     def test_model_entry_flags(self):
         e = up.model_entry("deepseek-v4.1-flash", {"supportsImages": True,

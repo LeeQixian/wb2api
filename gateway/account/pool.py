@@ -27,24 +27,15 @@ class AccountPool(object):
         self.logins = {}
         self._lock = threading.RLock()
         self._cursor = 0
-        # Smooth weighted round-robin state for the expiring-credits window,
-        # keyed by uid (see _weighted_pick). Runtime-only: a restart just
-        # restarts the rotation.
+        # Weighted round-robin state for the expiring-credits window, keyed by
+        # uid (see _weighted_pick). Runtime-only.
         self._expiry_weights = {}
         self.affinity = SessionAffinity()
         self.loaded_at = 0.0
 
     def load(self):
-        """Rescan accounts/ while keeping in-memory Account objects alive.
-
-        Replacing a live Account would swap its _refresh_lock/_save_lock for
-        new ones: a hot reload landing mid-refresh lets the old and new
-        objects refresh concurrently, each blind to the other's locks — and
-        because the upstream rotates the refresh token, a stale writer can
-        persist a now-dead token and brick the account. So for uids we
-        already hold, only credential/display fields are refreshed in place;
-        runtime state (locks, model cooldowns, product, last_error) survives.
-        """
+        """Rescan accounts/, refreshing accounts we already hold in place.
+        Rebuilding one would swap its locks and could persist a dead token."""
         fresh = {}
         if os.path.isdir(self.dir):
             for name in sorted(os.listdir(self.dir)):
@@ -71,9 +62,8 @@ class AccountPool(object):
                               "enterprise_id", "proxy", "credits",
                               "last_checkin", "path"):
                     setattr(kept, field, getattr(new, field))
-                # Token fields: never roll a fresher in-memory credential
-                # back to an older file (a refresh whose save() raced the
-                # rescan must not be undone by the stale copy on disk).
+                # Never roll a fresher in-memory credential back to an older
+                # file: a refresh whose save() raced the rescan must survive.
                 if (new.expires_at or 0) >= (kept.expires_at or 0):
                     kept.access_token = new.access_token
                     kept.refresh_token = new.refresh_token or kept.refresh_token
@@ -101,12 +91,8 @@ class AccountPool(object):
         return None
 
     def resolve(self, needle):
-        """Find one account by uid, uid prefix or nickname.
-
-        Returns (account, None) / (None, error). Exact uid wins; otherwise a
-        unique prefix or nickname match is required, so an ambiguous needle
-        never silently picks one.
-        """
+        """Find one account by uid, uid prefix or nickname, or (None, error).
+        Exact uid wins; an ambiguous prefix or nickname never picks silently."""
         needle = str(needle or "").strip()
         if not needle:
             return None, "empty account reference"
@@ -151,11 +137,8 @@ class AccountPool(object):
             return account
 
     def apply_reserve_credits(self, value=None):
-        """Re-resolve the low-credit guard for every account.
-
-        settings.json is the source of truth and the per-account value is
-        derived here, so the request path needs no extra settings lookup.
-        """
+        """Re-resolve the low-credit guard for every account from settings.
+        Per-account values are derived here so the request path needs no lookup."""
         if value is None:
             value = wb_settings.reserve_credits(self.dir)
         try:
@@ -169,13 +152,7 @@ class AccountPool(object):
 
     def apply_expiring_window(self, values=None):
         """Re-resolve the expiring-credits window for every account.
-
-        Same shape as apply_reserve_credits(): settings.json holds the window
-        per realm (global by default) and each account reads its own, so the
-        request path needs no extra settings lookup. The window is a dispatch
-        preference, not a guard: it never makes an account unavailable, it
-        only decides who is handed out first.
-        """
+        A dispatch preference, not a guard: it reorders picks, never blocks."""
         if values is None:
             values = wb_settings.expiring_window_days(self.dir)
         with self._lock:
@@ -184,14 +161,8 @@ class AccountPool(object):
         return values
 
     def apply_daily_token_limit(self, value=None, usage=None):
-        """Re-resolve the daily token guard for every account.
-
-        Same shape as apply_reserve_credits(): settings.json holds the limit,
-        while `usage` (uid -> tokens counted today) comes from the caller,
-        because only the upstream layer reads the usage log. Passing None
-        keeps the last known counts, so a settings change never turns them
-        into "unknown".
-        """
+        """Re-resolve the daily token guard from settings and usage counts.
+        usage (uid -> tokens today) comes from the caller; None keeps them."""
         if value is None:
             value = wb_settings.daily_token_limit(self.dir)
         try:
@@ -230,13 +201,8 @@ class AccountPool(object):
 
     def import_token(self, access_token, refresh_token=None, realm=None,
                      nickname="", enabled=True):
-        """Register (or replace) an account from a raw accessToken.
-
-        The replacement for the dashboard's import flow: paste a token from
-        any source (browser devtools, the hub's accounts/*.json, a desktop
-        .info file via import_credential) and it is decoded, realm-detected
-        and saved. Returns the Account.
-        """
+        """Register or replace an account from a raw accessToken and save it.
+        The token may come from devtools, accounts/*.json or a desktop .info."""
         kwargs = credential_to_kwargs(access_token, realm=realm)
         kwargs["refreshToken"] = str(refresh_token or "") or kwargs["refreshToken"]
         if nickname:
@@ -297,16 +263,8 @@ class AccountPool(object):
         return account
 
     def _pick_expiring_first(self, snapshot, exclude, model):
-        """Serve the in-window accounts first, or None when none can.
-
-        Within the window the pick is a weighted round-robin: an account's
-        share grows the closer its credits are to lapsing, but no account is
-        ever handed the whole window. A strict soonest-first order would put
-        every request on the one account expiring tomorrow until the upstream
-        rate-limited it, which is exactly the burst this spreads out.
-        Accounts that lapse on the same day carry the same weight, so they
-        keep taking turns (hub #174).
-        """
+        """Serve the in-window accounts first, or None when none can be served.
+        Weighted round-robin, not soonest-first: nobody takes the whole burst."""
         urgent = [a for a in snapshot if getattr(a, "in_expiring_window", None)
                   and a.in_expiring_window()]
         if not urgent:
@@ -318,11 +276,7 @@ class AccountPool(object):
 
     def _expiry_weight(self, account):
         """How much of the window's traffic this account should take.
-
-        Linear in how close the credits are to lapsing, floored at 1 so an
-        account at the far edge of the window still gets served rather than
-        starved until the others run dry.
-        """
+        Linear in how soon its credits lapse, floored at 1 so nobody starves."""
         try:
             window = int(account.expiring_window_days or 0)
         except (TypeError, ValueError):
@@ -333,12 +287,8 @@ class AccountPool(object):
         return max(1, int(round(window - days)) + 1)
 
     def _weighted_pick(self, ready):
-        """Smooth weighted round-robin over the ready accounts.
-
-        nginx's algorithm: every account accrues its weight each pick, the
-        largest running total wins, and the winner pays back the whole
-        round's weight. Equal weights degenerate to a plain rotation.
-        """
+        """Smooth weighted round-robin over the ready accounts (nginx's).
+        Some tie-break ordering keeps equal weights a plain rotation."""
         ready_uids = set(a.uid for a in ready)
         weights = [(account, self._expiry_weight(account)) for account in ready]
         with self._lock:
@@ -361,13 +311,8 @@ class AccountPool(object):
         exclude = exclude or set()
         with self._lock:
             snapshot = [a for a in self.accounts if not realm or a.realm == realm]
-        # Expiring-credits preference (#174): accounts whose soonest-expiring
-        # package is inside the window are served first, so credits about to
-        # lapse get spent. It only reorders who is offered; an account in the
-        # window is still skipped when it is cooling down, parked, or
-        # excluded. When the window covers nobody - or every covered account
-        # is unavailable - the pool falls back to the plain round-robin it
-        # always had, so a single lapsed account can never wedge the realm.
+        # Expiring-credits preference: serve in-window accounts first
+        # so credits about to lapse get spent; else plain round-robin.
         account = self._pick_expiring_first(snapshot, exclude, model)
         if account is not None:
             return account

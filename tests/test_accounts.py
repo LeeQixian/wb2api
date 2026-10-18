@@ -77,9 +77,8 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(a.uid, "uid-a")
         self.assertEqual(a.realm, "cn")  # issuer-driven
         self.assertEqual(a.expires_at, 1893456000)
-        # hub v1.6.3 (issue #76): the outbound identity is read back from the
-        # credential file and survives a restart; a file without the field
-        # falls back to the desktop identity that normalize_product maps to.
+        # hub v1.6.3 (#76): the stored identity survives a restart; a file
+        # without the field falls back to the desktop identity.
         self.assertEqual(a.product, acct_mod.identity.PRODUCT_DESKTOP)
         b = Account({"accessToken": jwt, "product": "cli"})
         self.assertEqual(b.product, "cli")
@@ -128,12 +127,60 @@ class AccountTests(unittest.TestCase):
         with open(a2.path, encoding="utf-8") as fh:
             self.assertIn("r-2", json.load(fh)["refreshToken"])
 
+    def test_breaker_strikes_decay_outside_fail_window(self):
+        # Strikes separated by more than FAIL_WINDOW are not "consecutive":
+        # isolated blips must never park the account (hub 166a02b).
+        from gateway.account.backoff import FAIL_WINDOW
+        a = Account({"accessToken": make_jwt(), "uid": "u1"})
+        now = time.time()
+        for i in range(5):
+            a.last_fail_at = now - (i + 1) * (FAIL_WINDOW + 60)
+            a.note_failure("blip %d" % i)
+        self.assertEqual(a.fails, 1)
+        self.assertEqual(a.breaker_until, 0.0)
+        b = Account({"accessToken": make_jwt(), "uid": "u2"})
+        for _ in range(3):
+            b.note_failure("rapid")
+        self.assertGreater(b.breaker_until, time.time())
+
+    def test_soft_ladders_decay_outside_fail_window(self):
+        # Same window as fails/degrades: yesterday's three 429s must not make
+        # today's first one start at the fourth rung.
+        from gateway.account.backoff import FAIL_WINDOW
+        a = Account({"accessToken": make_jwt(), "uid": "u3"})
+        for _ in range(3):
+            a.note_soft_rate("HTTP 429 (account soft rate)")
+        self.assertEqual(a.soft_streak, 3)
+        self.assertEqual(a.note_soft_rate("HTTP 429 (account soft rate)"), 4800.0)
+        a.last_soft_at = time.time() - (FAIL_WINDOW + 1)
+        self.assertEqual(a.note_soft_rate("HTTP 429 (account soft rate)"), 600.0)
+        self.assertEqual(a.soft_streak, 1)
+
+        b = Account({"accessToken": make_jwt(), "uid": "u4"})
+        for _ in range(3):
+            b.note_unscoped_rate("deepseek-v4.1-flash")
+        self.assertEqual(b.note_unscoped_rate("deepseek-v4.1-flash"), 480.0)
+        b.last_soft_at = time.time() - (FAIL_WINDOW + 1)
+        self.assertEqual(b.note_unscoped_rate("deepseek-v4.1-flash"), 60.0)
+        self.assertEqual(b.unscoped_streak, 1)
+
+    def test_unavailable_reason_shows_seconds_not_zero_minutes(self):
+        # "0 min left" on a 42-second cooldown reads as already usable.
+        a = Account({"accessToken": make_jwt(), "uid": "u5"})
+        a.cooldown_until = time.time() + 42
+        a.soft_streak = 3
+        reason = a.unavailable_reason(model="hy3")
+        self.assertIn("42s", reason)
+        self.assertNotIn("0 min", reason)
+        self.assertIn("#3", reason)
+
     def test_headers_chat_and_billing(self):
         a = Account({"accessToken": make_jwt(), "uid": "u1"})
         h = a.headers(purpose="chat")
         self.assertEqual(h["Authorization"], "Bearer " + a.access_token)
-        self.assertIn("X-Machine-ID", h)
-        self.assertEqual(h["X-Machine-ID"], acct_mod.derive_id("u1", "machine"))
+        # Official chat never sends X-Machine-ID / X-Session-ID (5.8.4 wire).
+        self.assertNotIn("X-Machine-ID", h)
+        self.assertIn("X-Conversation-ID", h)
         self.assertIn("X-IDE-Type", h)  # chat identity header set
         b = a.headers(purpose="billing")
         self.assertNotIn("X-IDE-Type", b)
@@ -156,9 +203,8 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(a2.nickname, "n2")
 
     def test_import_credential_real_world_shape(self):
-        # literal structure of the old-proxy export the owner actually has:
-        # account{uid,enterpriseId,nickname} + auth{accessToken,refreshToken,
-        # expiresAt,domain,realm}
+        # literal structure of the old-proxy export:
+        # account{...} + auth{accessToken,refreshToken,expiresAt,domain,realm}
         from gateway.accounts import credential_to_kwargs
         token = make_jwt(uid="real-uid", exp=1899000000,
                          iss="https://www.workbuddy.ai")  # iss lies; realm field wins
@@ -255,9 +301,8 @@ class PoolTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
 
     def test_load_preserves_live_objects_across_hot_reload(self):
-        # regression: load() rebuilt Account objects, swapping _refresh_lock/
-        # _save_lock under an in-flight refresh; the losing writer could then
-        # persist a dead rotated refresh token and brick the account.
+        # regression: load() must not rebuild Account objects, or a losing
+        # writer could persist a dead rotated refresh token.
         a = self.pool.import_token(make_jwt(uid="keep", exp=1893456000))
         a.model_cooldowns["hy3"] = time.time() + 300   # runtime state to keep
         # simulate a refresh that rotated tokens in memory ahead of the file

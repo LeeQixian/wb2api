@@ -10,13 +10,8 @@ from gateway import translate as tr
 
 
 def realm_state_file(accounts_dir):
-    """Path of the persisted realm switch.
-
-    Computed on every access rather than cached in a module constant: the
-    source built the constant from the default ACCOUNTS_DIR at import time,
-    so a later --accounts-dir still read and wrote the switch next to the
-    script, and the reported exit did not match the configured account store.
-    """
+    """Path of the persisted realm switch, computed on every access.
+    A cached import-time constant would ignore --accounts-dir."""
     return os.path.join(accounts_dir, "active_realm.json")
 
 

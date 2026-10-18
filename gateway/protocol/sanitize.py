@@ -1,6 +1,7 @@
 """Fingerprint sanitization; immunizes Codex/Claude Code WAF patterns."""
 
 
+import json
 import re
 
 
@@ -55,10 +56,8 @@ def sanitize_text(text):
         return text
     if not has_fingerprint(text):
         return text
-    # Keep the rewrite deliberately narrow: do not globally remove
-    # "OhMyOpenCode" or "Sisyphus-Junior", because either token alone is
-    # accepted by the upstream. Only the confirmed contiguous fingerprint is
-    # neutralized.
+    # Deliberately narrow: either token alone is accepted upstream, so only
+    # the confirmed contiguous fingerprint is neutralized.
     text = SANITIZE_OMO_JUNIOR_RE.sub("Sisyphus-Junior - Focused executor", text)
     for old, new in SANITIZE_REWRITES:
         text = text.replace(old, new)
@@ -96,9 +95,20 @@ def sanitize_tool_calls(tool_calls):
         if isinstance(tc, dict):
             item = dict(tc)
             fn = item.get("function")
-            if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+            if isinstance(fn, dict):
                 fn = dict(fn)
-                fn["arguments"] = sanitize_text(fn["arguments"])
+                raw_args = fn.get("arguments")
+                if isinstance(raw_args, str):
+                    fn["arguments"] = sanitize_text(raw_args)
+                elif raw_args is None:
+                    fn["arguments"] = "{}"
+                else:
+                    # Upstream wants arguments as a JSON string; dicts/lists
+                    # sent raw come back 400 code 11101. Serialize them.
+                    try:
+                        fn["arguments"] = json.dumps(raw_args, ensure_ascii=False)
+                    except Exception:
+                        fn["arguments"] = str(raw_args)
                 item["function"] = fn
             out.append(item)
         else:

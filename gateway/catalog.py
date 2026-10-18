@@ -1,8 +1,5 @@
-"""Built-in model catalog snapshots.
-
-Loaded from data/*.json so the model tables stay plain data instead of
-embedded source. Live sources override these via upstream.catalog.merge_catalog().
-"""
+"""Built-in model catalog snapshots loaded from data/*.json.
+Live sources override them via upstream.catalog.merge_catalog()."""
 import json
 import os
 

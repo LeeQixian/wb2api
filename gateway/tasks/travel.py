@@ -101,8 +101,7 @@ def do_cat_travel(account):
         if lid is None:
             lid = 1
         # status buddy_id is the current trip instance (0 at home), so it
-        # cannot prove a Buddy exists; trust depart's "no active buddy" and
-        # repair once (hub 0970a5d).
+        # proves nothing; repair once anyway.
         data, err = _travel_depart(account, lid)
         if data is None and "no active buddy" in (err or "").lower():
             if ensure_buddy(account):

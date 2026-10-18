@@ -6,6 +6,7 @@ import time
 import urllib.request
 
 from gateway import settings as wb_settings
+from gateway.config import identity as wb_identity
 
 REALM_CONFIGS = {
     "intl": {
@@ -14,8 +15,9 @@ REALM_CONFIGS = {
         "billing_upstream": "https://www.workbuddy.ai",
         "origin": "https://www.workbuddy.ai",
         "domain": "www.workbuddy.ai",
-        "chat_ua": "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2",
-        "billing_ua": "WorkBuddy/5.5.2",
+        # Single source: wb_identity (intl chat UA was once left stale here).
+        "chat_ua": wb_identity.DESKTOP_UA_INTL,
+        "billing_ua": "WorkBuddy/%s" % wb_identity.DESKTOP_VERSION_INTL,
         "has_checkin": False,
     },
     "cn": {
@@ -24,8 +26,8 @@ REALM_CONFIGS = {
         "billing_upstream": "https://www.codebuddy.cn",
         "origin": "https://www.codebuddy.cn",
         "domain": "copilot.tencent.com",
-        "chat_ua": "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1",
-        "billing_ua": "WorkBuddy/5.5.6",
+        "chat_ua": wb_identity.DESKTOP_UA_CN,
+        "billing_ua": "WorkBuddy/%s" % wb_identity.DESKTOP_VERSION_CN,
         "has_checkin": True,
     },
 }
@@ -92,12 +94,8 @@ def normalize_epoch(value):
 
 
 def realm_evidence(token, domain=None):
-    """Return "cn"/"intl" from token issuer then domain; None when unclear.
-
-    The token issuer outranks the domain: the domain is a client-side field
-    that may be stale or belong to the other realm, while the issuer is the
-    credential that will actually be sent.
-    """
+    """Return "cn"/"intl" from the token issuer, then the domain; None unclear.
+    The issuer outranks the domain, which may be stale or the other realm's."""
     iss = jwt_issuer(token).lower()
     if any(marker in iss for marker in CN_REALM_MARKERS):
         return "cn"

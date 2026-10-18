@@ -7,6 +7,7 @@ from gateway import identity as wb_identity
 import json
 import os
 import re
+import socket
 from gateway import settings as wb_settings
 from gateway.common.log import log
 
@@ -39,7 +40,7 @@ _RESTRICTION_403_MARKERS = ("unusual activity", "账号存在异常行为", "已
 
 
 def _switch_count(account, model):
-    """這一輪已經切過幾次（60 秒內的切換算同一輪）。"""
+    """Switches made this round (switches within 60s count as one round)."""
     entry = _SWITCH_LOG.get((account.uid, model))
     if not entry:
         return 0
@@ -50,12 +51,8 @@ def _switch_count(account, model):
 
 
 def _try_switch_product(account, model):
-    """429 時換身分重試。回傳 True 表示已切換、可以重試。
-
-    同一請求內最多切 MAX_PRODUCT_SWITCHES 次：
-      cli -> workbuddy -> cli -> workbuddy
-    四次都不行就放棄，讓呼叫端回報真正的 429。
-    """
+    """On 429, rotate identity and retry; True means a switch happened.
+    At most MAX_PRODUCT_SWITCHES per request, then the real 429 is reported."""
     count = _switch_count(account, model)
     if count >= MAX_PRODUCT_SWITCHES:
         return False
@@ -83,7 +80,7 @@ def _try_switch_product(account, model):
 
 
 def reset_switch_counter(account, model):
-    """成功之後歸零，下一次請求重新享有 4 次切換額度。"""
+    """Zero the counter after a success so the next request gets its budget."""
     _SWITCH_LOG.pop((account.uid, model), None)
 
 
@@ -98,12 +95,8 @@ def retry_after_seconds(model, realm, pool=None):
 
 
 def realm_model_throttled(realm, model, pool=None):
-    """True when accounts exist and are healthy but all are cooling this model.
-
-    Only a *model* cooldown counts. A plain account cooldown usually comes
-    from a transient network error, and reporting that as "rate limited" told
-    clients to back off from a model that was never throttled.
-    """
+    """True when accounts exist and are healthy but all cool this model.
+    Only a model cooldown counts; a plain account cooldown is a hiccup."""
     if not pool:
         return (False, 0)
     existing = [a for a in pool.accounts
@@ -121,12 +114,7 @@ def realm_model_throttled(realm, model, pool=None):
 
 def is_transient(exc):
     """Network-level flakiness that deserves a retry, not a cooldown.
-
-    Upstream occasionally drops a TLS handshake mid-stream
-    (SSL: UNEXPECTED_EOF_WHILE_READING / Remote end closed connection).
-    Treating that as a dead account took the only intl account offline for 60s
-    and turned one hiccup into a 502 storm.
-    """
+    Dropped TLS handshakes must not take an account offline."""
     t = ("%s %s" % (type(exc).__name__, exc)).lower()
     markers = (
         "ssl", "unexpected_eof", "eof occurred", "remote end closed",
@@ -135,6 +123,35 @@ def is_transient(exc):
         "bad gateway", "502", "503", "504", "incompleteread",
     )
     return any(m in t for m in markers)
+
+# DNS/route failures also arrive as URLError, but no account ever sent a
+# byte; these fingerprints identify "this host has no network" first.
+LOCAL_NETWORK_MARKERS = (
+    "gaierror", "getaddrinfo failed", "name or service not known",
+    "nodename nor servname", "temporary failure in name resolution",
+    "network is unreachable", "network is down", "no route to host",
+    "errno -2", "errno -3", "errno -5", "errno 100", "errno 101", "errno 113",
+    "winerror 11001", "winerror 10050", "winerror 10051", "winerror 10065",
+)
+
+
+def looks_like_local_network(exc):
+    """True when the host itself lost DNS/route, not the upstream."""
+    if isinstance(exc, socket.gaierror):
+        return True
+    reason = getattr(exc, "reason", None)
+    text = "%s %s %s" % (type(exc).__name__, exc, "" if reason is None else reason)
+    lower = text.lower()
+    return any(marker in lower for marker in LOCAL_NETWORK_MARKERS)
+
+
+class LocalNetworkError(Exception):
+    """Host network down: neither an account failure nor an upstream one."""
+
+    def __init__(self, detail=""):
+        self.detail = detail or ""
+        super().__init__("local network unavailable: %s"
+                         % (self.detail[:200] or "DNS/route failed"))
 
 
 def exc_detail(exc, limit=180):
@@ -147,15 +164,7 @@ def exc_detail(exc, limit=180):
 
 def parse_rate_limit_reset(detail):
     """Pull the reset time out of an upstream 429 body, if it names one.
-
-    Upstream answers code 6004 with a reset wall clock, but the wording is
-    per-realm: intl says "... your usage will reset at 2026-09-19 18:29:03
-    UTC+8 ...", the cn form says "... 将在 2026-10-09 14:44:59 UTC+8 重置 ...".
-    Matching only the English form left every cn 429 without a reset time, so
-    it read as scope-less and cooled the wrong thing (hub a351df9). Returns an
-    epoch or None. Kept tolerant on purpose: an unparseable body must not
-    break the request path.
-    """
+    Code 6004 wordings differ per realm, so intl and cn phrases both match."""
     if not detail:
         return None
     m = re.search(r"(?:reset at|将在)\s*"
@@ -178,11 +187,7 @@ def parse_rate_limit_reset(detail):
 
 def credential_scope_phrase(detail):
     """The scope phrase the body uses, or None when it names no scope.
-
-    ASCII phrases anchor on word boundaries so an identifier like `accountId`
-    cannot satisfy one; the Chinese phrases are plain substrings (no word
-    boundary exists to anchor to, and they cannot occur inside an identifier).
-    """
+    ASCII phrases anchor on word boundaries, so `accountId` cannot match."""
     lowered = (detail or "").lower()
     for phrase in ACCOUNT_SCOPE_PHRASES:
         if phrase.isascii():
@@ -203,12 +208,8 @@ def rate_limit_code(detail):
 
 
 def rate_limit_is_soft_shape(detail):
-    """True when a 429 body names a rate limit, whatever its scope (hub 72e51b4).
-
-    Covers both shapes the incident environment produced: the bare "usage
-    exceeds frequency limit" body (229 of 263 recorded 429s) and the intl code
-    14003 body ("too many requests").
-    """
+    """True when a 429 body names a rate limit, whatever its scope.
+    Covers the bare "usage exceeds frequency limit" and intl 14003 wordings."""
     text = (detail or "").lower()
     if any(marker in text for marker in SOFT_LIMIT_MARKERS):
         return True
@@ -217,11 +218,7 @@ def rate_limit_is_soft_shape(detail):
 
 def rate_limit_is_account_level(detail, reset_at):
     """True only with positive evidence that the 429 is credential-scoped.
-
-    A parser miss is evidence of nothing: the credential gets the 600s->2h
-    ladder only when the body itself says the limit is on the credential;
-    anything else parks one model (hub dc1a565).
-    """
+    The 600s->2h ladder only applies when the body says so."""
     if reset_at is not None:
         return False
     return credential_scope_phrase(detail) is not None
@@ -229,11 +226,7 @@ def rate_limit_is_account_level(detail, reset_at):
 
 def restriction_is_account_level(detail):
     """True when a 403 body says the ACCOUNT is restricted, not the content.
-
-    code matches on a regex ("11140" as a bare substring can hit a requestId);
-    an incomplete body falls back to the content-review path rather than
-    mis-parking an account.
-    """
+    An incomplete body falls back to content review instead of parking."""
     if not detail:
         return False
     if _RESTRICTED_403_CODE_RE.search(detail):

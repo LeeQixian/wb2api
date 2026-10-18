@@ -7,11 +7,7 @@ from gateway.common.log import log
 
 def _empty_content(value):
     """True when an assistant message carries no content at all.
-
-    None / "" / [] all mean "no content": clients disagree on which empty
-    shape they emit, and a batch split into adjacent assistant messages must
-    merge for either shape (a missed [] was the original 11148 case).
-    """
+    None / "" / [] all count; a missed [] was the original 11148 case."""
     if value is None:
         return True
     if isinstance(value, str):
@@ -35,24 +31,7 @@ def _merge_reasoning_content(dst, src):
 
 def merge_adjacent_tool_calls(messages):
     """Merge back-to-back assistant tool_calls messages into one.
-
-    Some OpenAI-compatible agent clients replay a parallel batch as several
-    adjacent assistant messages, each carrying one tool_call. DeepSeek-family
-    upstreams answer 400 / code 11148 (tool_call_sequence_broken) for that
-    shape and retire the conversation, because every retry replays the same
-    history and switching accounts cannot help. Merging the declarations
-    restores the shape the upstream accepts.
-
-    Conditions are strict, so no semantics are invented:
-      - the messages must be adjacent;
-      - the trailing message must have empty content (None/""/[]);
-      - the leading message must already be an assistant with tool_calls.
-
-    A second form folds a plain assistant's string content into a preceding
-    tool_calls assistant that has no content of its own (the same split batch
-    replayed in the other order). reasoning_content is preserved either way,
-    because DeepSeek multi-turn thinking requires it back.
-    """
+    Clients replay a parallel batch as adjacent messages (upstream 11148)."""
     if not isinstance(messages, list) or len(messages) < 2:
         return messages, False
     out = []
@@ -92,13 +71,7 @@ def merge_adjacent_tool_calls(messages):
 
 def is_truncated_arguments(raw):
     """True when a non-empty tool-arguments string is not valid JSON.
-
-    A stream cut off by max_tokens or a dropped connection leaves the last
-    tool call with half-written JSON. An empty/whitespace string is a legal
-    no-argument tool, and any parseable JSON (including null/scalars/arrays)
-    is the model's own output for the client to validate - only non-empty
-    unparsable strings count as truncation.
-    """
+    Empty strings are legal no-argument tools; parseable JSON is left alone."""
     if not isinstance(raw, str):
         return False
     trimmed = raw.strip()
@@ -129,15 +102,7 @@ def drop_truncated_tool_calls(calls):
 
 def repack_tool_result_blocks(messages):
     """Keep a tool_calls batch and its results adjacent.
-
-    The upstream requires the role:"tool" results to follow the assistant
-    message that requested them with nothing in between. Codex's
-    image_resize_notice, for one, arrives as a developer message right after a
-    tool output; with parallel calls it lands between two results, the pairing
-    reads as broken and the upstream rejects the whole request (code 11148),
-    retiring the conversation. This only reorders: same results, same relative
-    order, the intruders moved behind the batch.
-    """
+    Upstream rejects any message between them (code 11148); only reorders."""
     if not isinstance(messages, list) or len(messages) < 3:
         return messages, False
     out = []
@@ -198,14 +163,7 @@ def repack_tool_result_blocks(messages):
 
 def cleanup_orphan_tool_calls(messages):
     """Drop tool calls that have no result, and results that have no call.
-
-    A failed tool call (bad arguments, timeout, unknown tool) leaves the client
-    with an assistant tool_calls entry it can never answer: the result message
-    is never written, yet the entry rides along with the history on every later
-    turn and the upstream rejects each one (code 11148), so a single failed
-    call can retire a whole conversation. Both sides are trimmed against the
-    same set of ids, so no half-pairing can survive the repair.
-    """
+    A never-answered entry would make upstream 11148 on every later turn."""
     if not isinstance(messages, list) or not messages:
         return messages, False
     call_ids = set()
@@ -288,9 +246,8 @@ def backfill_reasoning_content(messages, model, thinking_enabled=None):
                 legacy = item.get("reasoning")
                 rc = legacy if isinstance(legacy, str) else ""
                 item["reasoning_content"] = rc
-            # Mirror onto `reasoning` with a non-empty value: upstream rejects
-            # an empty/absent reasoning, while a whitespace placeholder passes
-            # its length check and carries no model-visible semantics.
+            # Upstream rejects empty/absent reasoning, so mirror a whitespace
+            # placeholder onto `reasoning` (no model-visible semantics).
             existing = item.get("reasoning")
             if not (isinstance(existing, str) and existing):
                 item["reasoning"] = rc if rc else " "
@@ -302,10 +259,7 @@ def backfill_reasoning_content(messages, model, thinking_enabled=None):
 
 def normalize_roles(messages):
     """Map role names the upstream rejects onto ones it accepts.
-    WorkBuddy only knows system / user / assistant / tool. OpenAI's newer
-    "developer" role (used by the Codex CLI and current SDKs) is the same thing
-    as "system", but sending it verbatim fails with code 11128.
-    """
+    "developer" means "system" here; sent verbatim it fails with code 11128."""
     out = []
     for m in messages or []:
         if not isinstance(m, dict):

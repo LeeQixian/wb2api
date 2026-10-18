@@ -16,16 +16,7 @@ from gateway.protocol.usage import _responses_usage
 
 def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, namespace_map=None, sources=None):
     """Fold a Chat Completions object into a Responses API response object.
-
-    custom_names is the set of tool names the client declared as freeform
-    ("custom"). Calls to those tools are re-inflated into custom_tool_call
-    items so clients such as Codex recognise them.
-
-    request_meta echoes the request-level capabilities (tools, tool_choice,
-    parallel_tool_calls) back on the response. They used to be hardcoded to
-    tools=[], tool_choice=auto and parallel_tool_calls=true, so a client that
-    asked for something else was told the opposite of what it requested.
-    """
+    custom_names re-inflates freeform calls; request_meta echoes the request."""
     custom_names = custom_names or set()
     choice = (chat_obj.get("choices") or [{}])[0]
     msg = choice.get("message") or {}
@@ -170,7 +161,7 @@ def stream_responses_events(upstream, model, holder):
             "summary": [{"type": "summary_text", "text": "".join(reason_parts)}],
         }
     def _annotations():
-        """引用來源：只認工具真的回傳過的網址。"""
+        """Cited sources: only URLs a tool actually returned."""
         try:
             return build_citations("".join(text_parts), holder.get("web_sources") or [])
         except Exception:
@@ -251,7 +242,7 @@ def stream_responses_events(upstream, model, holder):
                         "content_index": 0, "delta": clean_rem,
                     })
             text_buffer = ""
-        # 2. DSML fallback: emit buffered/parsed DSML tool calls if no structured tool_calls were emitted
+        # 2. DSML fallback: emit parsed DSML calls when no tool_calls came.
         full_text = "".join(text_parts)
         dsml_calls = dsml_tool_calls
         if not dsml_calls:
@@ -587,11 +578,8 @@ def stream_responses_events(upstream, model, holder):
                             break
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
-    # Truncated streams (max_tokens, dropped connection) can leave tool-call
-    # arguments as half-written JSON. Do not close those calls out as
-    # completed: drop them before finalize so the client never receives a
-    # function_call_arguments.done / output_item.done with unparsable
-    # arguments. Complete calls in the same batch are kept (#153).
+    # Truncated streams leave tool-call arguments as half-written JSON; drop
+    # those calls before finalize so the client never sees them as complete.
     dropped_truncated = 0
     if tool_calls_map and (finish == "length" or not saw_done):
         for idx in sorted(tool_calls_map.keys()):
@@ -604,13 +592,8 @@ def stream_responses_events(upstream, model, holder):
 
 def follow_up_with_tool_results(pool, internal_calls, holder, model, session_key,
                                 t_start, drop_tools=False):
-    """執行反代自己代跑的網路工具，把結果餵回模型，回傳新的上游連線。
-
-    drop_tools=True 表示這是最後一輪：把網路工具從工具清單收回，模型沒有東西
-    可以再呼叫，只能用手上的結果把話講完。舊版在回合用盡時合成一個
-    resp_wrapup（status=completed、output=[]）收尾，那等於把失敗偽裝成正常
-    結束，客戶端看到的就是「講到一半斷掉」——issue #43。
-    """
+    """Run the gateway's own web tools and feed the results back upstream.
+    drop_tools=True is the final round; never fake a completed wrapup."""
     convo = holder.get("convo_messages")
     if convo is None:
         convo = list(holder.get("base_messages") or [])
@@ -660,11 +643,7 @@ def follow_up_with_tool_results(pool, internal_calls, holder, model, session_key
 
 def internal_calls_from_chat(chat_obj, web_tools=False):
     """Calls in an aggregated chat completion the gateway runs itself.
-
-    Only a request whose definitions the gateway injected can carry such a
-    call; with the switch off a client's own same-named function stays the
-    client's, so this answers empty.
-    """
+    With the switch off, a client's own same-named function answers empty."""
     message = ((chat_obj.get("choices") or [{}])[0] or {}).get("message") or {}
     out = []
     if not web_tools:

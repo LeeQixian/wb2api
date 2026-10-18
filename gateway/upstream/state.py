@@ -1,7 +1,5 @@
 """Shared mutable upstream state.
-
-Holds the values server.main() injects at startup. Read as attributes.
-"""
+Holds the values server.main() injects at startup. Read as attributes."""
 import threading
 
 import os

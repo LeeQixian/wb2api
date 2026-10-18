@@ -1,9 +1,5 @@
 """Integration tests for gateway.server against a fake upstream.
-
-Everything offline: no real workbuddy/tencent call. The agents' modules
-(accounts/settings/translate/upstream) are the contract targets; server.py
-is exercised end-to-end over real HTTP against a local ThreadingHTTPServer.
-"""
+Fully offline: the real HTTP server is exercised against a local fake."""
 import json
 import os
 import socket

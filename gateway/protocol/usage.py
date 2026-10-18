@@ -3,12 +3,7 @@
 
 def _best_cached_tokens(usage):
     """Best cache-hit value across every alias the upstreams emit (E3).
-
-    Order mirrors the panel: prompt_tokens_details.cached_tokens >
-    prompt_cache_hit_tokens > cache_read_input_tokens > cached_tokens >
-    input_tokens_details.cached_tokens > completion_tokens_details.
-    First positive value wins; zero aliases never shadow a real hit.
-    """
+    prompt_tokens_details.cached_tokens first; a zero alias never wins."""
     if not isinstance(usage, dict):
         return 0
     prompt_details = usage.get("prompt_tokens_details") or {}
@@ -33,12 +28,7 @@ def _best_cached_tokens(usage):
 
 def normalize_usage_cache_aliases(usage):
     """Write the best cache-hit value into every alias.
-
-    Some responses carry the real hit in prompt_tokens_details.cached_tokens
-    while also emitting cache_read_input_tokens: 0 / cached_tokens: 0
-    compatibility aliases; strict downstream parsers may prefer the zero
-    aliases and lose the hit. Mutates and returns the usage dict.
-    """
+    Zero-valued aliases would otherwise make strict parsers lose the hit."""
     if not isinstance(usage, dict):
         return usage
     best = _best_cached_tokens(usage)

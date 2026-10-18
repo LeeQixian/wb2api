@@ -17,9 +17,8 @@ class HTTPBase(object):
     """Shared plumbing; the route mixins build on this."""
 
     def handle_one_request(self):
-        # Reset per-request state: keep-alive reuses one Handler instance for
-        # many requests, and a stale _body_consumed would skip a needed drain
-        # and desync the connection (the bogus "414" bug of the original).
+        # Keep-alive reuses one Handler, so per-request state must reset: a
+        # stale _body_consumed skips a drain and desyncs the connection.
         self._body_consumed = False
         super().handle_one_request()
 
@@ -138,17 +137,19 @@ class HTTPBase(object):
             pass
 
 
-    def _error(self, code, message, err_type="server_error"):
+    def _error(self, code, message, err_type="server_error", gateway_hint=None):
         self._handle_expect_continue()
         self._discard_body()
-        self._json(code, {"error": {"message": message, "type": err_type, "code": code}})
+        body = {"error": {"message": message, "type": err_type, "code": code}}
+        if gateway_hint:
+            body["error"]["gateway_hint"] = gateway_hint
+        self._json(code, body)
 
 
     def _rate_limited(self, exc):
         wait = max(1, int(getattr(exc, "wait", 60) or 60))
-        # A 429 raised without an upstream call (the pool is parked by the
-        # daily token guard) carries its own text; everything else keeps the
-        # upstream wording.
+        # A 429 raised without an upstream call carries its own text; the
+        # rest keep the upstream wording.
         custom = getattr(exc, "message", "")
         text = custom or (
             "upstream rate limit reached for this model; retry in %ds" % wait)
@@ -236,7 +237,10 @@ class HTTPBase(object):
             return self._read_payload()
         except BodyTooLarge as exc:
             self._error(413, "payload too large (%d bytes > %d limit)"
-                        % (exc.length, _state.MAX_PAYLOAD_BYTES), "invalid_request_error")
+                        % (exc.length, _state.MAX_PAYLOAD_BYTES), "invalid_request_error",
+                        gateway_hint=("single request body exceeds the gateway cap "
+                                      "(WB_MAX_PAYLOAD_BYTES, default 16MB); "
+                                      "raise it and restart"))
         except BadJSON:
             self._error(400, "invalid JSON body", "invalid_request_error")
         return None
@@ -283,12 +287,7 @@ class HTTPBase(object):
 
     def _realm_guard(self, model):
         """Return an error string for realm/banned mismatches, '' when fine.
-
-        Only an *explicit* per-request realm (X-Realm header / ?realm=) can
-        conflict with a model's exclusive exit. Without one the request
-        auto-routes: exclusive models pick their own exit, dual-exit models
-        follow the global realm.
-        """
+        Only an explicit realm can conflict with a model's exclusive exit."""
         req_realm = getattr(self, "_pinned_realm", None) or self._request_realm()
         owner = upstream.exclusive_realm(model or "")
         if req_realm in ("intl", "cn") and owner and owner != req_realm:

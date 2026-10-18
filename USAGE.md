@@ -238,6 +238,7 @@ API key 填你 set-key 的值。
 | `503 no usable account` | 池里没有可用号 | `wbctl list` 看 ready 列；n 的 `refresh`，全 off 的 `enable`，没有号就 `login` |
 | `400 模型 xxx 只在xx提供` | 出口冲突 | `cn:hy3` 这种前缀或 X-Realm 指到了该模型没有的出口；去掉前缀或换出口 |
 | `429` + Retry-After | 被上游限流或触发了自己的限额 | 按提示等；常发就把 `daily-token-limit` 设上、并发降下来 |
+| `413 payload too large` | 单次请求体超过 16MB 上限 | 响应里的 `gateway_hint` 会指明 `WB_MAX_PAYLOAD_BYTES`；调大后重启网关 |
 | list 里 ready=n | token 死了 | `wbctl refresh <uid>`；刷不动就重新 `login` |
 | 客户端连不上 | 分不清谁的锅 | 先 `curl /health`：通=客户端配置问题（base URL 有没有带 `/v1`）；不通=网关没起来，看它的终端输出 |
 | 改了 realm/开关没生效 | 正在跑的网关是启动时读的 | 重启网关，或对单次请求用 `cn:`/`global:` 前缀 |

@@ -6,10 +6,7 @@ from gateway.common.log import log
 
 class ContentRejected(Exception):
     """Upstream content review rejected this request (403 / code 11140).
-
-    Not an account problem: another credential gets the same 403 for the same
-    content, so it is passed straight through instead of cooling the pool.
-    """
+    Not an account problem, so it passes through without cooling the pool."""
 
     def __init__(self, http_error=None, detail=""):
         self.http_error = http_error
@@ -29,8 +26,7 @@ class RateLimited(Exception):
         self.http_error = http_error
         self.detail = detail or ""
         self.wait = max(1, int(wait or 60))
-        # 429s answered without an upstream call (the pool is parked by the
-        # daily token guard) carry their own text instead of the upstream
-        # wording.
+        # 429s raised without an upstream call (the daily token guard parks
+        # the pool) carry their own text.
         self.message = message or ""
         super().__init__("upstream rate limit: %s" % (self.detail[:200] or "429"))

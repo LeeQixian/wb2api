@@ -1,10 +1,5 @@
 """Protocol-trap regression tests for gateway.translate.
-
-Each test pins one upstream behaviour documented by PATCHED-BY-OPS or a code
-comment in the source project: the empty function_call placeholder, the
-orphan tool-call pairing rejection (11148), reasoning backfill (11155),
-developer-role rejection (11128), DSML tool calls, Responses<->chat mapping.
-"""
+Each test pins one upstream behaviour documented by PATCHED-BY-OPS."""
 import json
 import sys
 import unittest

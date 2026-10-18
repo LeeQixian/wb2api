@@ -1,8 +1,4 @@
-"""Shared HTTP-layer state.
-
-Populated by main() and by tests; read through this module so writes are
-visible everywhere.
-"""
+"""Shared HTTP-layer state; populate via this module so writes stay visible."""
 import os
 import sys
 import threading

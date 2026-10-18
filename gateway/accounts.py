@@ -1,8 +1,4 @@
-"""Accounts facade.
-
-Re-exports the account surface the rest of the gateway and the tests use as
-gateway.accounts.X. Implementation lives in gateway.account.*
-"""
+"""Accounts facade: re-exports gateway.account.* as gateway.accounts.X."""
 import re  # noqa: F401
 import sys
 import types

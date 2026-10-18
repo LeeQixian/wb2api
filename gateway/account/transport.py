@@ -35,12 +35,8 @@ _OPENER_LOCK = threading.Lock()
 
 
 def opener_for_proxy(proxy):
-    """Build (and cache) a urllib opener bound to one outbound proxy.
-
-    Empty/blank means "direct", signalled by None so callers can fall back to
-    the process default opener. One opener per account keeps each account's
-    traffic pinned to its own exit IP instead of sharing a rotating pool.
-    """
+    """Cached urllib opener bound to one proxy; None means the default one.
+    One opener per account pins each account to its own exit IP."""
     proxy = str(proxy or "").strip()
     if not proxy:
         return None
@@ -70,12 +66,8 @@ def urlopen(req, timeout=30, proxy=""):
 
 def http_json(url, data=None, method=None, headers=None, timeout=30,
               retries=3, backoff=1.0, log=None, proxy=""):
-    """urlopen + json decode with retries.
-
-    Chinese networks and CDN edges routinely drop a TLS handshake with
-    "SSL: UNEXPECTED_EOF_WHILE_READING"; a single retry almost always
-    succeeds, so every upstream call goes through here.
-    """
+    """urlopen + JSON decode with retries; all upstream calls go through here.
+    CDN edges routinely drop TLS handshakes, and one retry fixes them."""
     attempts = max(1, int(retries or 1))
     last = None
     for attempt in range(1, attempts + 1):

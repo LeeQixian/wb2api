@@ -23,6 +23,19 @@ def record_row(row):
             fh.write(line)
     except Exception as exc:
         log("usage write failed: %s" % exc, "WARN")
+        return
+    # The balance refresher visits one account per tick, so subtract this
+    # request's real cost now, or the reserve guard goes stale between ticks.
+    amount = row.get("credit")
+    uid = row.get("account")
+    pool = _state.POOL
+    if amount and uid and pool is not None:
+        try:
+            account = pool.get(uid)
+            if account is not None:
+                account.consume_credit(amount)
+        except Exception:
+            pass
 
 
 def _usage_fields(usage):

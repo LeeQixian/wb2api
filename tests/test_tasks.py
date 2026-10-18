@@ -1,8 +1,5 @@
 """Offline tests for gateway.tasks / gateway.scheduler.
-
-Nothing reaches the network: every upstream call is intercepted by a fake
-urlopen keyed on URL substrings, and time.sleep is recorded, not slept.
-"""
+Every upstream call is intercepted by a fake urlopen; sleep is recorded."""
 import io
 import json
 import os

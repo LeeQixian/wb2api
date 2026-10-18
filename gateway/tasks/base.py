@@ -5,11 +5,13 @@ import random
 import time
 
 from gateway.common.log import log, set_logger  # noqa: F401
+from gateway.config import identity as wb_identity
 
 CHAT_BASE = "https://copilot.tencent.com"
 BILL_BASE = "https://www.codebuddy.cn"
 WEB_BASE = "https://www.workbuddy.cn"
-DESKTOP_UA = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
+# cn-only module; UA single-sourced from wb_identity.
+DESKTOP_UA = wb_identity.DESKTOP_UA_CN
 WEB_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36")
 
@@ -66,11 +68,8 @@ TEAM_ID_POOL = [
 
 
 def _pause(seconds=1.0):
-    """Sleep 2-7s (uniform), never below the given floor.
-
-    Keeps timing off a machine beat while preserving the >=1.0s floor. Tests
-    monkeypatch time.sleep for determinism.
-    """
+    """Sleep 2-7s (uniform), never below the floor.
+    Keeps timing off a machine beat; tests monkeypatch time.sleep."""
     return time.sleep(max(float(seconds), random.uniform(2.0, 7.0)))
 
 

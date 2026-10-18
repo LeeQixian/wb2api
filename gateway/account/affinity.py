@@ -18,6 +18,20 @@ def _human_delta(seconds):
     return "%d min" % int(seconds / 60)
 
 
+def _human_left(seconds):
+    """Cooldown remainder in seconds: 42s / 1m30s / 2h30m.
+    `_human_delta` rounds a minute down to "0 min", which reads as already free."""
+    secs = max(0, int(round(seconds)))
+    if secs < 60:
+        return "%ds" % secs
+    if secs < 3600:
+        m, s = divmod(secs, 60)
+        return "%dm%02ds" % (m, s) if s else "%dm" % m
+    h, rem = divmod(secs, 3600)
+    m = rem // 60
+    return "%dh%02dm" % (h, m) if m else "%dh" % h
+
+
 class SessionAffinity(object):
     def __init__(self, ttl=7200, max_entries=5000):
         self.ttl = ttl

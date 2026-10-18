@@ -23,7 +23,7 @@ class MaintenanceMixin(object):
     """Mixed into Account; relies on headers()/save()/chat_base_url()/fetch_credits()."""
 
     def is_enterprise(self):
-        """Enterprise accounts have no personal growth/checkin system (hub 07d033c)."""
+        """Enterprise accounts have no personal growth/checkin system."""
         return bool(self.enterprise_id or self.jwt_enterprise_id())
 
 
@@ -89,7 +89,7 @@ class MaintenanceMixin(object):
 
 
     def web_headers(self):
-        """网页版 app 的出站头：只有 bearer 与 X-User-Id，没有桌面端指纹。"""
+        """Web-app outbound headers: bearer plus X-User-Id, no desktop fingerprint."""
         return {
             "Authorization": "Bearer " + self.access_token,
             "X-User-Id": self.uid,
@@ -102,13 +102,8 @@ class MaintenanceMixin(object):
 
 
     def daily_chat_web(self, prompt=None):
-        """网页通道的每日活跃会话（issue #75 / #59 / #90）。
-
-        只建会话是不够的：agent 要等客户端接上沙箱并请求这一轮才会跑，否则会话
-        永远停在 CREATING、没有任何输出，也就不算一次有效对话（#90 实测）。这里
-        按网页端的顺序走完：建会话 → 取沙箱 link+token → ACP 的 initialize /
-        session/load / session/prompt（见 gateway.webagent）→ 轮询到 completed。
-        """
+        """Daily-active web session.
+        Creating it is not enough: the agent runs once this client prompts it."""
         if self.realm != "intl":
             return {"ok": False, "error": "web daily chat is only for international accounts"}
         body = {
@@ -168,7 +163,7 @@ class MaintenanceMixin(object):
 
 
     def _web_conversation_get(self, conversation, suffix=""):
-        """读一条网页端会话（suffix 为空拿会话本身，"/session" 拿沙箱信息）。"""
+        """Read one web session ("" = the session, "/session" = sandbox info)."""
         url = WEB_CONVERSATIONS_URL + urllib.parse.quote(str(conversation)) + suffix
         req = urllib.request.Request(url, headers=self.web_headers(), method="GET")
         with _transport.urlopen(req, timeout=30, proxy=self.proxy) as resp:
@@ -176,7 +171,7 @@ class MaintenanceMixin(object):
 
 
     def _web_conversation_status(self, conversation):
-        """这条会话现在什么状态（completed 就是这一轮真的跑完了）。"""
+        """Current status of this session (completed = the turn really ran)."""
         try:
             payload = self._web_conversation_get(conversation)
         except Exception:
@@ -186,15 +181,8 @@ class MaintenanceMixin(object):
 
 
     def daily_chat(self, web=None):
-        """国际版每日活跃对话（官方每日活跃 30/50 积分）。
-
-        两步：桌面端身分的轻量对话（一直以来的做法），以及网页通道的会话
-        （issue #75/#59/#90：算数的是「跑完的 agent 会话」）。web=None 时按
-        settings.json 里的 daily_chat_web 决定，True/False 可显式指定。
-
-        延迟导入 gateway.upstream：upstream 模块级导入 accounts，
-        反向在模块级导入会成环。
-        """
+        """Intl daily-active chat: desktop turn plus the web-channel session.
+        web=None follows settings.json daily_chat_web; upstream is imported lazily."""
         if self.realm != "intl":
             return {"ok": False, "error": "daily chat is only for international accounts"}
         from gateway import upstream as wb_proxy
@@ -216,9 +204,8 @@ class MaintenanceMixin(object):
             if web is None:
                 web = bool(self.path) and wb_settings.daily_chat_web(os.path.dirname(self.path))
             web_res = self.daily_chat_web() if web else None
-            # Only a finished web-channel session counts toward the daily
-            # bonus, so only it may close the day (hub 93e9f26): a failed web
-            # leg leaves lastDailyChat unset so the next sweep retries.
+            # Only a finished web session counts for the daily bonus, so only
+            # it closes the day; a failed leg stays unset.
             if not web or (web_res or {}).get("ok"):
                 self.last_daily_chat = time.strftime("%Y-%m-%d %H:%M:%S")
                 if self.path and os.path.exists(os.path.dirname(self.path)):

@@ -99,12 +99,8 @@ def is_chat_model(mid):
 
 
 def is_model_banned(model):
-    """True 表示這個模型名不該被送去上游。
-
-    規則：ALLOWED_MODELS / ALLOWED_PREFIXES 命中就放行；其餘只要命中
-    BANNED_SUBSTRING 或 EXTRA_BANNED 就拒絕，沒命中則照常送往上游。
-    三個設定預設都是空的，所以預設不封鎖任何模型。
-    """
+    """True when this model name must not be sent upstream.
+    Allow-lists pass; others are rejected only on a banned-substring hit."""
     if not model:
         return False
     m = str(model).strip().lower()
@@ -124,16 +120,7 @@ def is_model_banned(model):
 
 def model_catalog_meta(model):
     """The catalog metadata dict for a model, or {}.
-
-    Read from the same merged catalog that /v1/models advertises, so what a
-    request defaults cannot disagree with what the model list promised the
-    client. Failures fall back to {} (callers use their own default).
-
-    Deliberately side-effect free: it reads the already-populated model cache
-    and the shipped static tables only. Calling fetch_models() here would let a
-    cold cache trigger an upstream discovery round-trip from inside request
-    handling, turning one chat call into a network fetch.
-    """
+    Side-effect free: reads the populated cache and static tables only."""
     if not model:
         return {}
     try:

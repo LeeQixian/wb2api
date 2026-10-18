@@ -1,8 +1,4 @@
-"""Protocol facade.
-
-Re-exports every symbol the rest of the gateway and the tests reference as
-gateway.translate.X. Implementation lives in gateway.protocol.*
-"""
+"""Protocol facade: re-exports every gateway.protocol.* symbol as translate.X."""
 import re  # noqa: F401  (kept for callers that reach through this module)
 import sys
 import types

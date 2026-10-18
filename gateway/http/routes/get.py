@@ -58,10 +58,8 @@ class GetRoutes(object):
                 data = [upstream.model_entry(mid, meta) for mid, meta in entries]
                 return self._json(200, {"object": "list", "data": data,
                                         "realm": req_realm})
-            # no explicit realm: the full menu across BOTH exits with
-            # cn:/global: exit aliases, independent of the global default
-            # (upstream.fetch_models_all; server side pairs with
-            #  translate.split_realm_prefix)
+            # No explicit realm: the full menu across BOTH exits with
+            # cn:/global: aliases, independent of the global default.
             entries = upstream.fetch_models_all(pool=pool)
             data = [upstream.model_entry(mid, meta) for mid, meta in entries]
             return self._json(200, {"object": "list", "data": data, "realm": "all"})

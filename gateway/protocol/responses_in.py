@@ -69,9 +69,8 @@ def _responses_input_to_messages(payload):
                     role = item.get("role") or "user"
                     if role == "developer":
                         role = "system"
-                    # If this is assistant text and the previous message is an assistant
-                    # message (e.g. from an adjacent function_call), merge them so
-                    # tool_calls and text stay in one message without breaking tool sequence.
+                    # Merge assistant text into a preceding assistant message
+                    # so tool_calls and text share one message.
                     if role == "assistant" and messages and messages[-1].get("role") == "assistant":
                         prev = messages[-1]
                         if prev.get("content"):
@@ -88,9 +87,8 @@ def _responses_input_to_messages(payload):
                             pending_reasoning = ""
                         messages.append(msg_dict)
             elif itype == "reasoning":
-                # Reasoning item from previous assistant turn in Responses API.
-                # In standard Chat Completions, reasoning is either backfilled into
-                # the assistant message's reasoning_content or omitted.
+                # Reasoning from an earlier assistant turn: backfill it into
+                # the assistant message's reasoning_content, else omit it.
                 r_text = ""
                 summ = item.get("summary")
                 if isinstance(summ, list):
@@ -120,9 +118,8 @@ def _responses_input_to_messages(payload):
                     else:
                         _txt = str(raw_out or "")
                     if isinstance(_txt, list):
-                        # #145: _flatten_content returns structured chat parts
-                        # when the output carries images. Keep them as
-                        # multimodal user content instead of crashing on .strip().
+                        # image output arrives as structured parts; keep
+                        # them multimodal instead of crashing on .strip().
                         log("[wb2api] orphan function_call_output kept as "
                             "multimodal parts (%d)" % len(_txt))
                         messages.append({
@@ -270,7 +267,7 @@ def responses_to_chat(payload):
     if payload.get("max_output_tokens") is not None:
         chat["max_tokens"] = payload["max_output_tokens"]
     else:
-        # #121: same catalog default as build_upstream_body, so the value is
+        # same catalog default as build_upstream_body, so the value is
         # already right before the echo of request_meta happens.
         default_max = model_default_max_output_tokens(payload.get("model"))
         if default_max:

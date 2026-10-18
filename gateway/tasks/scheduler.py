@@ -1,14 +1,5 @@
-"""Background scheduler (off by default, with per-day random offsets).
-
-Jobs: token keep-alive (refresh when under 2h), CN daily check-in, cat
-travel (depart/claim), and the 01:00 black_cat report.
-
-Anti-risk-control invariants, do not drop: enabled defaults False, so the
-standing loop only runs with Scheduler(enabled=True).start() or --tasks;
-each schedule time gets a per-day +/-15-45 min offset persisted to
-accounts/scheduler-state.json (a fixed 09:00:00 is itself a signature);
-account spacing is 3-10s (the source used a fixed 1.0s).
-"""
+"""Background scheduler (off by default, per-day random offsets).
+Times get a persisted +/-15-45 min daily offset; account spacing is 3-10s."""
 import json
 import os
 import random
@@ -98,7 +89,7 @@ class Scheduler:
             self.log("调度状态落盘失败: %s" % exc)
 
     def _ensure_today_offsets(self):
-        """±15~45 分钟偏移，每日每个整点一次；当日重启从 state 恢复不漂移。"""
+        """+/-15-45 min per day at each hour, restored from state on restart."""
         day = time.strftime("%Y-%m-%d")
         if getattr(self, "_offset_day", None) == day and self._offsets:
             return
@@ -144,7 +135,7 @@ class Scheduler:
             self._stop_event.wait(30)
 
     def _check_due(self):
-        """30 秒轮询：当前时间命中任一 (hour, offset) 触发分钟则执行。"""
+        """Poll every 30s; fire when now matches an (hour, offset) minute."""
         now = time.localtime()
         minute = now.tm_hour * 60 + now.tm_min
         day = time.strftime("%Y-%m-%d")
@@ -176,7 +167,7 @@ class Scheduler:
         self.next_run_time = time.strftime("%Y-%m-%d %H:%M:%S", t)
 
     def trigger_now(self):
-        """手动立即触发一次调度检查（无视 enabled 开关）。"""
+        """Run one schedule check now, ignoring the enabled switch."""
         if self._run_lock.locked():
             return {"ok": False, "msg": "已有巡检正在执行，请稍候再试"}
         threading.Thread(target=self._execute_cycle, args=("手动立即触发",),

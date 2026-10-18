@@ -1,9 +1,5 @@
 """Tests for the module-layout refactor and its two behaviour changes.
-
-Covers: facade transparency (state proxies and patch forwarding), the
-catalog data files, nickname/prefix account resolution, the growthplan
-command, and the rule that the scheduler keeps disabled accounts alive.
-"""
+Facade transparency, catalog data files, uid/prefix resolution, growthplan."""
 import io
 import json
 import os

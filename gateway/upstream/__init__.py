@@ -1,9 +1,5 @@
-"""Upstream facade.
-
-Exposes the outbound-request surface as gateway.upstream.X. Implementation
-lives in the sibling modules; state is re-exported live so external writes
-(server.main) keep working.
-"""
+"""Upstream facade: exposes the outbound-request surface as gateway.upstream.X.
+Implementation lives in the sibling modules; live state is re-exported."""
 import sys
 import types
 
@@ -20,6 +16,7 @@ from gateway.upstream.state import (  # noqa: F401
     _POOL, ACCOUNTS_DIR, USAGE_DIR, _lock,
 )
 from gateway.upstream.errors import ContentRejected, RateLimited  # noqa: F401
+from gateway.upstream.retry import LocalNetworkError  # noqa: F401
 from gateway.upstream.guards import (  # noqa: F401
     _daily_usage, apply_daily_token_limit, auto_switch_product_enabled,
     daily_tokens_by_account, usage_log_path,

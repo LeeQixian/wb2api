@@ -1,5 +1,6 @@
 """Backoff, breaker and park-until helpers for per-account failure governance."""
 
+import os
 import time
 
 SOFT_RATE_BASE = 600.0
@@ -12,6 +13,12 @@ BREAKER_COOLDOWN_MAX = 21600.0
 DEGRADE_THRESHOLD = 5
 DEGRADE_COOLDOWN = 600.0
 DEGRADE_COOLDOWN_MAX = 7200.0
+# Strikes separated by more than this gap are no longer "consecutive";
+# WB_FAIL_WINDOW=0 restores the old accumulate-forever behavior.
+try:
+    FAIL_WINDOW = max(0.0, float(os.environ.get("WB_FAIL_WINDOW") or 600.0))
+except (TypeError, ValueError):
+    FAIL_WINDOW = 600.0
 
 
 def _exponential_backoff(count, base, cap, offset):
@@ -38,18 +45,13 @@ def degrade_backoff(fails):
 
 
 def unverified_soft_backoff(streak):
-    """Window for `streak` consecutive unscoped soft-limit 429s (hub 72e51b4)."""
+    """Window for `streak` consecutive unscoped soft-limit 429s."""
     return _exponential_backoff(streak, SOFT_RATE_UNVERIFIED_BASE,
                                 SOFT_RATE_UNVERIFIED_MAX, 1)
 
 
 def next_local_4am(now=None):
-    """Epoch of the next local 04:00.
-
-    The daily reset that puts CN credits back happens overnight, so the
-    04:00 wall is what an out-of-credits park waits for. A timestamp already
-    past 04:00 rolls to tomorrow, so a deadline is never reused in place.
-    """
+    """Epoch of the next local 04:00; the CN credit reset behind 402 parks."""
     now = time.time() if now is None else now
     lt = time.localtime(now)
     stamp = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,

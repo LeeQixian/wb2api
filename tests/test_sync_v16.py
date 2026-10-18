@@ -1,16 +1,5 @@
 """Regression pins for the hub v1.5.5..v1.6.10 sync.
-
-Each test defends one ported behaviour that the *old* code got wrong (an
-upstream issue fixed at the hub) or a switch whose default must stay off:
-
-  - v1.5.7 tool_choice="none" keeps the tools declaration (agent loop bug)
-  - v1.5.9 the OmO Sisyphus-Junior contiguous fingerprint is rewritten
-  - v1.6.7 the user's own context compaction is not a "background" request
-  - v1.6.10 streamed function_call events carry item_id
-  - v1.5.6 low-credit reserve + v1.6.7 daily token limit park the account
-  - v1.6.9 local web tools ship OFF and swap the declaration when turned on
-  - v1.6.8 three outbound identities, desktop default; grok-4.7 intl-only
-"""
+Each test defends one ported fix or a switch default that must stay off."""
 import io
 import json
 import os
@@ -158,9 +147,8 @@ class Guards(unittest.TestCase):
         self.assertEqual(pool2.accounts[0].reserve_credits, 66)
 
     def test_all_parked_maps_to_rate_limited(self):
-        # the guard re-folds usage.jsonl on every request, so park the pool
-        # by writing today's spend for this uid into the log, not by poking
-        # the in-memory counter (open_upstream would recompute it away).
+        # The guard re-folds usage.jsonl per request, so park the pool by
+        # writing today's spend, not by poking the in-memory counter.
         st.set_daily_token_limit(self.dir, 10)
         usage_dir = tempfile.mkdtemp()
         self.addCleanup(__import__("shutil").rmtree, usage_dir, True)
@@ -197,7 +185,7 @@ class Identity(unittest.TestCase):
                          "https://www.workbuddy.ai")
         h = identity.build_identity_headers("workbuddy", "intl", "u", "t")
         self.assertEqual(h["X-IDE-Type"], "WorkBuddy")
-        self.assertEqual(h["X-Product"], "WorkBuddy")
+        self.assertEqual(h["X-Product"], "SaaS")
 
     def test_account_identity_persisted(self):
         a = Account({"accessToken": make_jwt(uid="u1"), "uid": "u1"})
@@ -308,6 +296,22 @@ class v1617Fixes(unittest.TestCase):
             {"model": "hy3", "max_tokens": 55,
              "messages": [{"role": "user", "content": "x"}]})
         self.assertEqual(explicit["max_tokens"], 55)
+
+    def test_gpt_max_tokens_floor(self):
+        # Upstream GPT-family rejects max_output_tokens below 16.
+        clamped = tr.build_upstream_body(
+            {"model": "gpt-6-astra", "max_tokens": 1,
+             "messages": [{"role": "user", "content": "x"}]})
+        self.assertEqual(clamped["max_tokens"], 16)
+        kept = tr.build_upstream_body(
+            {"model": "gpt-6-astra", "max_tokens": 32,
+             "messages": [{"role": "user", "content": "x"}]})
+        self.assertEqual(kept["max_tokens"], 32)
+        # Other families keep the caller's value untouched.
+        other = tr.build_upstream_body(
+            {"model": "hy3", "max_tokens": 1,
+             "messages": [{"role": "user", "content": "x"}]})
+        self.assertEqual(other["max_tokens"], 1)
 
     # ---- #153: split batches merge back, truncated args drop ----
     def test_adjacent_tool_calls_merge(self):
@@ -498,10 +502,8 @@ class v1617Fixes(unittest.TestCase):
             calls.append(account_self.uid)
             account_self.credits = {"remain": 9, "updated_at": time.time()}
             return {"ok": True, "credits": account_self.credits}
-        # patch.object must actually be started: a bare mock.patch.object(...)
-        # never applies. Never setattr+delattr on the class either - deleting
-        # the attribute would erase the real fetch_credits for every later
-        # suite in the process.
+        # patch.object must be started, or it never applies; never
+        # setattr+delattr on the class either, as that erases the real method.
         r = CreditsRefresher(pool, interval_seconds=60)
         st.set_credits_refresh_hours(self.dir, 12)
         with mock.patch.object(Account, "fetch_credits", fake_fetch):

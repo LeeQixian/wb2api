@@ -1,7 +1,4 @@
-"""Filesystem paths resolved at runtime by server.main().
-
-Modules read these instead of holding their own copies.
-"""
+"""Filesystem paths resolved at runtime by server.main()."""
 import os
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

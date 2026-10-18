@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
-"""wb2api — minimal local WorkBuddy -> OpenAI-compatible gateway.
-
-Routes: GET /health, GET /realm, POST /realm, GET /v1/models, GET /credits,
-POST /v1/chat/completions, POST /v1/responses. The API key is read only from
-the Authorization / x-api-key / api-key headers (no ?key=). Binds 127.0.0.1
-unless --host says otherwise; CORS stays off unless --cors is passed.
-
-Standard library only (Python >= 3.9).
-"""
+"""wb2api - minimal local WorkBuddy -> OpenAI-compatible gateway (stdlib only).
+Routes: /health /realm /v1/models /credits /v1/chat/completions /v1/responses."""
 import os
 import sys
 import types

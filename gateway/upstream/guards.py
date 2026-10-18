@@ -32,21 +32,14 @@ def row_outcome(row):
 
 def _local_midnight(ts=None, days_back=0):
     """Local midnight `days_back` days before `ts` (default: now).
-
-    mktime normalises an out-of-range day, so stepping back past the 1st of a
-    month still lands on a real local midnight instead of raising.
-    """
+    mktime normalises out-of-range days instead of raising."""
     lt = time.localtime(ts if ts is not None else time.time())
     return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - days_back, 0, 0, 0, 0, 0, -1))
 
 
 def _scan_daily_tokens(offset, totals):
     """Fold rows at/after today's local midnight into `totals`.
-
-    Returns (totals, new_offset). A line without its trailing newline is left
-    for the next scan: rows are appended whole, so a partial tail only means
-    this read raced the writer.
-    """
+    Returns (totals, new_offset); a line without its newline waits for next scan."""
     midnight = _local_midnight()
     with open(usage_log_path(), encoding="utf-8") as fh:
         fh.seek(offset)
@@ -79,11 +72,8 @@ def _scan_daily_tokens(offset, totals):
 
 
 def daily_tokens_by_account(ttl=None):
-    """uid -> tokens counted since local midnight, cached for `ttl` seconds.
-
-    None means the log could not be read at all; callers keep that distinct
-    from zero so a failed read never parks an account.
-    """
+    """uid -> tokens since local midnight, cached for `ttl` seconds.
+    None means the log was unreadable; callers keep that distinct from zero."""
     ttl = _STATS_TTL if ttl is None else ttl
     day = time.strftime("%Y-%m-%d")
     now = time.time()
@@ -122,11 +112,7 @@ def seconds_until_local_midnight():
 
 def apply_daily_token_limit(pool=None):
     """Push the daily token setting and today's counts into the pool.
-
-    A pool without the guard API (test doubles, hand-built lists) is a no-op;
-    the guard is a real-AccountPool feature and must never be what breaks a
-    request path.
-    """
+    A pool without the guard API (test doubles) is a no-op."""
     pool = pool if pool is not None else _state._POOL
     directory = getattr(pool, "dir", None)
     if pool is None or directory is None or not hasattr(pool, "apply_daily_token_limit"):

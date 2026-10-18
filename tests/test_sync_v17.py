@@ -1,7 +1,5 @@
 """Regression pins for the hub v1.6.18..v1.7.2 sync batch.
-
-Each test defends one ported upstream fix; hub commits cited per class.
-"""
+Each test defends one ported upstream fix; hub commits cited per class."""
 import io
 import json
 import os
@@ -33,7 +31,7 @@ def fake_http_error(code, payload):
 
 
 class ResetWording(unittest.TestCase):
-    # hub a351df9: cn wording "将在 ... 重置"
+    # hub a351df9: the cn 429 wording ("... will reset at ...")
     def test_cn_and_en_both_parse(self):
         cn = up.parse_rate_limit_reset("用量已超出频率限制，将在 2026-10-09 14:44:59 UTC+8 重置")
         en = up.parse_rate_limit_reset("usage will reset at 2026-10-09 14:44:59 UTC+8")

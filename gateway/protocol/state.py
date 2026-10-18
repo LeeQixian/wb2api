@@ -1,8 +1,4 @@
-"""Shared mutable protocol state.
-
-Holds the values that server.main() and upstream.realm mutate at runtime.
-Read as attributes (state.CURRENT_REALM), never imported by value.
-"""
+"""Shared mutable protocol state; read as attributes, never import by value."""
 import os
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

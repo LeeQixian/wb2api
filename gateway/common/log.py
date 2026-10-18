@@ -1,8 +1,4 @@
-"""Shared logging sink.
-
-Every module logs through here. server.main() may install a custom sink;
-without one, lines go to stderr.
-"""
+"""Shared logging sink; server.main() may install one, else stderr."""
 import sys
 import threading
 

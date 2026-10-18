@@ -63,16 +63,7 @@ _catalog_lock = threading.Lock()
 
 def merge_reasoning(base, live):
     """Field-level merge of one model's reasoning block.
-
-    The live catalogue is the source of truth, but it does not always restate
-    every field: the desktop endpoint sometimes gives a bare `effort` where the
-    bundled table knows the level is selectable. A top-level update would drop
-    `supportedEfforts`, and an `effort` without it reads as a pin - the model
-    then looks unselectable in /v1/models and every request to it is reported at
-    the wrong level. So the two blocks are merged field by field, and a block
-    that ends up with `supportedEfforts` is selectable: its `effort` is the
-    default restated, not a pin.
-    """
+    A top-level update would drop supportedEfforts and read `effort` as a pin."""
     out = dict(base) if isinstance(base, dict) else {}
     if isinstance(live, dict):
         out.update(live)
@@ -92,8 +83,14 @@ def merge_catalog(primary, realm=None, extras=False):
     else:
         source_static = getattr(wb_catalog, "STATIC_CN_MODELS" if r == "cn"
                                 else "STATIC_INTL_MODELS", wb_catalog.STATIC_MODELS)
+    live_ids = set(mid for mid, _meta in (primary or []))
     for item in source_static:
         mid = item.get("id")
+        # A paid model upstream still ships but whose free twin it retired:
+        # keep the bundled "-f" out, or the picker offers a dead free model.
+        if (mid == "hy4-preview-f" and "hy4-preview" in live_ids
+                and "hy4-preview-f" not in live_ids):
+            continue
         # First catalog wins for a shared id, so the intl entry is not
         # overwritten by its cn counterpart when both are merged.
         if mid and is_chat_model(mid) and mid not in merged:
@@ -103,11 +100,8 @@ def merge_catalog(primary, realm=None, extras=False):
             continue
         if meta:
             base = merged.get(mid) or {}
-            # #177: the live catalogue is the source of truth, but it does not
-            # always restate every reasoning field: a bare `effort` would read
-            # as a pin and drop the bundled `supportedEfforts`, making the
-            # model look unselectable in /v1/models. Capture the base block
-            # before update() overwrites it, then merge per field.
+            # the live catalogue rarely restates every reasoning field,
+            # so merge per field instead of overwriting the bundled block.
             base_reasoning = base.get("reasoning")
             base.update(meta)
             if isinstance(meta.get("reasoning"), dict):
@@ -119,16 +113,18 @@ def merge_catalog(primary, realm=None, extras=False):
     out = []
     if r == "all":
         order = list(INTL_UI_ORDER) + [m for m in CN_UI_ORDER if m not in INTL_UI_ORDER]
+    # Upstream retired the free twin but still serves the paid model: the UI
+    # order lists only "-f", so swap it or the paid model never ships.
+    if "hy4-preview" in live_ids and "hy4-preview-f" not in live_ids:
+        order = ["hy4-preview" if m == "hy4-preview-f" else m for m in order]
     seen = set()
     for mid in order:
         if mid in merged and mid not in seen:
             seen.add(mid)
             out.append((mid, merged[mid]))
     if extras:
-        # A model the curated table has never heard of still ships when the
-        # *live* catalogue lists it - that is how a newly added upstream model
-        # reaches /v1/models without a release. The bundled snapshot alone is
-        # not enough: it also carries legacy entries the picker may not show.
+        # A model the curated table never heard of still ships when the live
+        # catalogue lists it, which is how new upstream models appear here.
         for mid, _meta in primary or []:
             if mid in merged and mid not in seen:
                 seen.add(mid)
@@ -138,12 +134,7 @@ def merge_catalog(primary, realm=None, extras=False):
 
 def fetch_endpoint_models(pool=None, realm="intl"):
     """Live menu, fetched from the SAME host the chat requests go to.
-
-    The endpoint used to be hardwired to workbuddy.ai, which answers cn
-    tokens too (and hands back the intl menu) — the cn realm then listed
-    models the domestic servers do not actually serve. Pick a ready
-    account of the requested realm instead and use its chat_base_url().
-    """
+    Hardwiring workbuddy.ai listed cn models the domestic servers lack."""
     account = pool.pick(realm=realm) if pool else None
     if account is None:
         log("model discovery skipped: no usable %s account" % realm)
@@ -174,12 +165,8 @@ def fetch_endpoint_models(pool=None, realm="intl"):
 
 
 def remote_config_headers(account, realm, ua=None):
-    """Headers for the product-config call.
-
-    The UA decides which catalogue comes back and only the desktop UA returns
-    the full list (an unknown one is a hard 400, code 12403), so this uses a
-    realm's fixed desktop UA rather than the account's current identity.
-    """
+    """Headers for the product-config call: a realm's fixed desktop UA.
+    Only the desktop UA returns the full list; unknown ones are 400 / 12403."""
     cfg = wb_accounts.get_realm_config(realm)
     return {
         "Accept": "application/json, text/plain, */*",
@@ -193,11 +180,7 @@ def remote_config_headers(account, realm, ua=None):
 
 def _agent_model_lists(payload):
     """Every agent's bare-string model list, cli-named agents first.
-
-    The catalogue the picker shows rides in agents[].models. The endpoint
-    answers with it under a "data" key while the desktop cache file is the
-    same document written to disk without that envelope, so both are read.
-    """
+    The picker's catalogue rides in agents[].models, under "data" or top level."""
     roots = [payload]
     data = payload.get("data")
     if isinstance(data, dict):
@@ -229,14 +212,7 @@ def _agent_model_lists(payload):
 
 def parse_remote_catalog(payload):
     """(ids, meta) from a /v3/config response, or None when it carries none.
-
-    The picker's list rides in agents[].models as bare ids - under "data" in
-    the endpoint's answer, at the top level in the desktop cache file. The
-    per-model metadata (credits, limits, copy) lives in a separate models
-    array. An unusable credential answers HTTP 200 with an *empty* list, so
-    an empty catalogue is reported as None and the caller falls back instead
-    of publishing "this exit has no models".
-    """
+    An unusable credential answers 200 with an empty list, never published."""
     if not isinstance(payload, dict):
         return None
     cli_lists, other_lists = _agent_model_lists(payload)
@@ -273,11 +249,7 @@ def parse_remote_catalog(payload):
 
 def snapshot_credits():
     """id -> credits from the bundled catalogue (both realms, intl first).
-
-    Used to answer "is there a free sibling?" for a variant the remote lists
-    but whose sibling it no longer does: the free hy4-preview-f, for example,
-    is what the cn picker keeps while the remote only names the paid one.
-    """
+    Answers "is there a free sibling?" for a variant the remote renamed."""
     out = {}
     for source in (getattr(wb_catalog, "STATIC_INTL_MODELS", []),
                            getattr(wb_catalog, "STATIC_CN_MODELS", [])):
@@ -290,37 +262,29 @@ def snapshot_credits():
 
 def curate_remote_catalog(realm, ids, meta=None):
     """Trim a remote catalogue to the models the picker should offer.
-
-      - virtual aliases (default-model ... auto) are not models;
-      - "-sg" / "-x" builds are the paid variant of a name the list already
-        carries;
-      - when a free ("x0.00") sibling exists, the free one is the one the
-        picker shows, so the paid sibling is dropped;
-      - everything else keeps its upstream order. Names the upstream does not
-        list at all stay available through the curated order tables and the
-        bundled snapshot, which merge_catalog() keeps.
-    """
+    Drops aliases and "-sg"/"-x" builds when a free sibling exists."""
     credits = snapshot_credits()
     for mid, item in (meta or {}).items():
         if isinstance(item, dict):
             credits[mid] = str(item.get("credits") or "").strip().lower()
-    order = CN_UI_ORDER if realm == "cn" else INTL_UI_ORDER
-    known = set(ids) | set(credits) | set(order)
 
     def free(mid):
         return credits.get(mid) in ("x0.00", "x0", "0", "0.00")
 
     out = []
+    live = set(ids)
     for mid in ids:
         if not is_chat_model(mid):
             continue
         if mid.endswith(VARIANT_SUFFIXES):
             continue
+        # Only live siblings count: the bundled snapshot may still list a free
+        # twin upstream has since retired, and that would drop the paid model.
         if mid.endswith("-f"):
             base = mid[:-2]
-            if base in known and free(base) and not free(mid):
+            if base in live and free(base) and not free(mid):
                 continue
-        elif (mid + "-f") in known and free(mid + "-f") and not free(mid):
+        elif (mid + "-f") in live and free(mid + "-f") and not free(mid):
             continue
         out.append(mid)
     return out
@@ -328,12 +292,7 @@ def curate_remote_catalog(realm, ids, meta=None):
 
 def fetch_remote_product_config(realm, pool=None):
     """(ids, meta) from the realm's own product-config endpoint, or None.
-
-    At most two 10s attempts bound the wait: one per desktop UA, because the
-    endpoint sits behind the WAF where a dropped connection is normal, and
-    every caller has a fallback (the desktop cache file, the narrow model
-    endpoint, the bundled snapshot).
-    """
+    At most two 10s attempts (one per desktop UA); callers all fall back."""
     if realm not in ("intl", "cn") or pool is None:
         return None
     account = pool.representative(realm=realm)
@@ -367,12 +326,7 @@ def fetch_remote_product_config(realm, pool=None):
 
 def curated_live_sources(realm, pool=None):
     """(entries, extras) for the realm's live catalogue, already curated.
-
-    Remote /v3/config first; `extras` says the entries came from the desktop
-    catalogue, whose membership may add a model the curated tables have never
-    seen. The bundled snapshot is the last fallback (no desktop-app cache
-    file: this port ships none).
-    """
+    Remote /v3/config first; extras marks a desktop-catalogue fallback."""
     remote = None
     try:
         remote = fetch_remote_product_config(realm, pool=pool)
@@ -387,9 +341,8 @@ def curated_live_sources(realm, pool=None):
 
 def fetch_models(realm=None, pool=None):
     r = realm or get_realm()
-    # One upstream walk per realm even when several callers miss the cache at
-    # the same moment: a batch of /v1/models requests must not turn into a
-    # batch of upstream requests.
+    # One upstream walk per realm even when several callers miss the cache:
+    # a batch of /v1/models requests must not fan out upstream.
     with _catalog_lock:
         with _state._lock:
             c = tr._models_cache.get(r) or {"at": 0.0, "data": None}
@@ -411,14 +364,7 @@ def fetch_models(realm=None, pool=None):
 
 def fetch_models_all(pool=None):
     """Full menu across BOTH exits, independent of the global realm.
-
-    A model appears exactly once under its bare id. Only models served by
-    BOTH exits additionally get "cn:<id>" / "global:<id>" aliases — for an
-    exclusive model the bare id already pins the exit, and listing a second
-    name for it is duplicate-menu noise. Current-realm entries come first
-    so the order still reflects the gateway default. Each entry's meta
-    carries "exitRealm" (bare dual-exit entries: the current realm).
-    """
+    Only dual-exit models get cn:<id>/global:<id> aliases; current realm first."""
     catalogs = {realm: dict(fetch_models(realm=realm, pool=pool))
                 for realm in ("intl", "cn")}
     dual = set(catalogs["intl"]) & set(catalogs["cn"])
@@ -444,13 +390,8 @@ def fetch_models_all(pool=None):
 
 
 def model_entry(mid, meta):
-    """Build a rich /v1/models entry from the desktop app catalog metadata.
-
-    The OpenAI spec only names id/object/created/owned_by, so capability data
-    is convention-driven. Several shapes are emitted at once so that different
-    clients (OpenRouter-style, LobeChat-style, plain-flag readers) all find
-    what they look for.
-    """
+    """Build a rich /v1/models entry from desktop app catalog metadata.
+    Several shapes ship at once so OpenRouter/LobeChat-style clients parse."""
     meta = meta or {}
     item = {
         "id": mid,
@@ -467,6 +408,12 @@ def model_entry(mid, meta):
     # ---- modality / capability ----
     # disabledMultimodal explicitly turns image input off; absent means allowed.
     vision = bool(meta.get("supportsImages")) and not meta.get("disabledMultimodal")
+    # cn:/global: aliases must hit the same override as the bare id.
+    bare = mid.split(":", 1)[-1] if mid.startswith(("cn:", "global:")) else mid
+    if bare == "glm-5.3-flash":
+        # Its metadata claims images, but the upstream has no vision channel.
+        vision = False
+        item["vision_note"] = "declared multimodal, no vision channel upstream"
     tools = bool(meta.get("supportsToolCall"))
     thinks = bool(meta.get("supportsReasoning"))
     inputs = ["text"] + (["image"] if vision else [])

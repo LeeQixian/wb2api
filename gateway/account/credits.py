@@ -7,24 +7,8 @@ from gateway.common.log import log
 
 
 class CreditsRefresher(threading.Thread):
-    """Keep account credit balances fresh, off the request path.
-
-    The dispatch preference reads `account.credits`, which only the sign-in and
-    daily-activity tasks used to refresh: an account could go days without an
-    update, and a restart inherited whatever balance was on disk. Every tick
-    this refreshes the single stalest account that is past the TTL, so the
-    upstream billing calls stay bounded - one per tick - and land spread across
-    the pool instead of arriving as a burst. A failed account is parked for six
-    hours so a broken credential cannot be retried on every tick.
-
-    The request volume is capped by the tick, not by the pool size: at the
-    default half-hour tick that is at most 48 billing calls a day however many
-    accounts there are. With a 12-hour TTL a 28-account pool wants 56 calls a
-    day, so the tick - not the TTL - is the binding limit and the effective
-    refresh age settles a little above the TTL. That is the intended trade:
-    the preference is measured in days, so a few extra hours of drift is worth
-    far less than the calls it saves.
-    """
+    """Keep credit balances fresh off the request path.
+    Each tick refreshes the stalest account past its TTL, one call per tick."""
 
     def __init__(self, pool, interval_seconds=1800):
         super().__init__(daemon=True, name="credits-refresher")
@@ -66,11 +50,8 @@ class CreditsRefresher(threading.Thread):
             return 0.0
 
     def stalest_account(self, ttl_seconds, now=None):
-        """The account whose balance is oldest and past the TTL, or None.
-
-        A balance that was never fetched counts as infinitely old, so a fresh
-        install fills in its accounts before any timed-out one is revisited.
-        """
+        """The account whose balance is oldest and past its TTL, or None.
+        A never-fetched balance counts as infinitely old."""
         now = time.time() if now is None else now
         with self.pool._lock:
             accounts = list(self.pool.accounts)

@@ -55,9 +55,8 @@ def set_system_prompt(text):
 
 def build_upstream_body(payload):
     model = payload.get("model") or ""
-    # Resolve the effective thinking state before the backfill below: while
-    # thinking is on, the upstream requires reasoning_content on every
-    # assistant message, whether or not the client kept a reasoning trace.
+    # Resolve thinking state first: with thinking on, upstream requires
+    # reasoning_content on every assistant message.
     thinking = payload.get("thinking")
     thinking_type = ""
     if isinstance(thinking, dict):
@@ -74,53 +73,44 @@ def build_upstream_body(payload):
     messages = backfill_reasoning_content(
         messages, model, thinking_enabled=thinking_enabled
     )
-    # #160: gateway system-prompt mode. passthrough (default) keeps the
-    # client's own system/developer messages and only tops up a neutral
-    # placeholder when the request carries none; custom replaces the whole
-    # block with the gateway prompt; append inserts after the leading run.
+    # system-prompt mode. passthrough keeps the client's messages (and
+    # tops up a placeholder), custom replaces them, append inserts after them.
     mode, text = prompt_mode_config()
     messages = wb_prompt.apply_mode(messages, mode, text, placeholder=state.SYSTEM_PROMPT)
     body = dict(payload)
-    # Private request markers ride along on the chat body for the Responses
-    # path (the namespace map, the local-web-tools flag). They are not part of
-    # the upstream protocol, so drop them here rather than trusting the
-    # upstream to ignore unknown keys.
+    # Private Response-path markers (namespace map, local-web-tools flag) are
+    # dropped here: they are not part of the upstream protocol.
     for _marker in [k for k in body if str(k).startswith("_")]:
         body.pop(_marker, None)
     # dict(payload) copies the raw model name; overwrite it with the alias.
     body["model"] = model
     body["messages"] = messages
-    # Repair tool-call pairing before the body leaves: a call whose result never
-    # came back, or results split from their batch by an interleaved message,
-    # makes the upstream reject every later turn of that conversation.
-    # Order matters (#153): merge the split parallel-batch declarations
-    # first, so repack sees one complete batch.
+    # Repair tool-call pairing before the body leaves, or upstream rejects
+    # every later turn. Merge split batches first, then repack.
     repaired, _merged = merge_adjacent_tool_calls(body["messages"])
     repaired, _repacked = repack_tool_result_blocks(repaired)
     repaired, _cleaned = cleanup_orphan_tool_calls(repaired)
     body["messages"] = repaired
     translate_max_completion_tokens(body)
+    # Upstream GPT-family rejects max_output_tokens below 16 with a 400.
+    if "max_tokens" in body and str(model).lower().startswith("gpt-"):
+        try:
+            value = int(body["max_tokens"])
+        except (TypeError, ValueError):
+            value = 0
+        if 0 < value < 16:
+            body["max_tokens"] = 16
     normalize_tool_choice(body)
     normalize_tools(body)
     normalize_stop(body)
-    # #121: Codex/Responses clients omit max_output_tokens by default; the
-    # upstream then applies its own internal cap and long reasoning runs
-    # exhaust before any text comes out. Default to the catalog's declared
-    # maxOutputTokens when the client left it out. An explicit max_tokens /
-    # max_completion_tokens always keeps precedence.
+    # when the client omits max_output_tokens, default to the catalog's
+    # maxOutputTokens; an explicit value always wins.
     if "max_tokens" not in body:
         default_max = model_default_max_output_tokens(model)
         if default_max:
             body["max_tokens"] = default_max
-    # Thinking injection for DeepSeek models.
-    #
-    # thinking.type=enabled on its own does not switch the reasoning trace on:
-    # the upstream still answers without one unless an effort level rides along.
-    # Measured against the live upstream on deepseek-v4.1-flash, same prompt:
-    #   enabled + no effort   -> reasoning_tokens 0,  reasoning_content len 0
-    #   reasoning_effort=high -> reasoning_tokens 37, reasoning_content len 117
-    # The client's own choice always wins; an effort level is only filled in
-    # when it left the field out, and never for a request that opted out.
+    # Thinking injection for DeepSeek models: thinking.type=enabled alone yields
+    # no trace, upstream needs an effort level too. The client's choice wins.
     if str(model).lower().startswith("deepseek"):
         thinking = body.get("thinking")
         opted_out = isinstance(thinking, dict) and \
@@ -145,8 +135,7 @@ def normalize_tool_choice(obj):
         val = tc.strip().lower()
         if val == "none":
             # Keep the tools declaration when tool_choice is "none": without
-            # the schema the model downgrades calls to unparseable text and the
-            # agent loops. The field itself already expresses the intent.
+            # it the model emits unparsable text calls.
             obj["tool_choice"] = "none"
         return
     if isinstance(tc, dict):
@@ -166,9 +155,42 @@ def normalize_tool_choice(obj):
         obj.pop("tool_choice", None)
 
 
+def _normalize_tool_parameters(fn):
+    """Repair function.parameters so upstream schema validation accepts it.
+    `parameters: {}` and a missing type:"object" are 400 / code 11129."""
+    if not isinstance(fn, dict):
+        return
+    params = fn.get("parameters")
+    if params is None or not isinstance(params, dict):
+        fn["parameters"] = {"type": "object", "properties": {}}
+        return
+    p = dict(params)
+    if p.get("type") != "object":
+        p["type"] = "object"
+    if "properties" not in p or not isinstance(p.get("properties"), dict):
+        p["properties"] = {}
+    if "required" in p:
+        req = p["required"]
+        if isinstance(req, list):
+            p["required"] = [str(x) for x in req if x is not None]
+        elif isinstance(req, str):
+            p["required"] = [req]
+        else:
+            p.pop("required", None)
+    fn["parameters"] = p
+
+
 def normalize_tools(obj):
+    # Legacy clients may still send root-level functions instead of tools.
+    if "functions" in obj and "tools" not in obj:
+        funcs = obj.pop("functions")
+        if isinstance(funcs, list):
+            obj["tools"] = [{"type": "function", "function": f}
+                            for f in funcs if isinstance(f, dict)]
     tools = obj.get("tools")
     if not tools or not isinstance(tools, list):
+        if "tools" in obj:
+            obj.pop("tools", None)
         return
     norm = []
     for t in tools:
@@ -183,10 +205,19 @@ def normalize_tools(obj):
             }
             if "strict" in t:
                 fn["strict"] = t["strict"]
+            _normalize_tool_parameters(fn)
             norm.append({"type": "function", "function": fn})
         else:
-            norm.append(t)
-    obj["tools"] = norm
+            item = dict(t)
+            if "function" in item and isinstance(item["function"], dict):
+                fn = dict(item["function"])
+                _normalize_tool_parameters(fn)
+                item["function"] = fn
+            norm.append(item)
+    if norm:
+        obj["tools"] = norm
+    else:
+        obj.pop("tools", None)
 
 
 def translate_max_completion_tokens(obj):
@@ -205,9 +236,7 @@ def translate_max_completion_tokens(obj):
 
 def normalize_stop(obj):
     """Upstream Go struct pins stop to []string; OpenAI allows a bare string.
-
-    Empty/invalid values drop the field (hub c3f263d, code 11101).
-    """
+    Empty/invalid values drop the field (code 11101)."""
     if "stop" not in obj:
         return
     val = obj["stop"]
@@ -225,11 +254,7 @@ def normalize_stop(obj):
 
 def prompt_mode_config():
     """(mode, text) for this request; default ("passthrough", "").
-
-    Read per request, so `wbctl set-prompt` takes effect on the next one
-    without a restart (#160). A file that cannot be read fails open to the
-    built-in prompt.
-    """
+    Read per request, so set-prompt applies without a restart."""
     try:
         cfg = wb_settings.prompt_config(state.ACCOUNTS_DIR)
     except Exception:
@@ -248,32 +273,14 @@ def prompt_mode_config():
 
 def prompt_cache_key_enabled():
     """Whether to inject prompt_cache_key into outbound requests.
-
-    Off by default. The upstream turns out to cache repeated prefixes on its
-    own: with an identical ~8k-token prefix sent twice, the second call already
-    reports prompt_cache_hit_tokens=9600 and the same credit with or without
-    this field, on both exits (www.workbuddy.ai and copilot.tencent.com) and on
-    both a free and a billed model. Injecting it changed neither the hit rate
-    nor the charge, so it is left as an opt-in for experimenting rather than
-    added to every request.
-    """
+    Off by default: this upstream caches prefixes without it already."""
     return os.environ.get("WB_PROMPT_CACHE_KEY", "0").strip().lower() in (
         "1", "true", "yes", "on")
 
 
 def inject_prompt_cache_key(body, uid, conversation):
     """Add the upstream prompt_cache_key so its prefix cache can be reused.
-
-    Kept for experimentation only: measurement on this upstream showed the
-    prefix cache working without it (see prompt_cache_key_enabled). The key
-    still carries the account uid, because the upstream cache is scoped per
-    account -- a key shared between accounts would let one account's request
-    read another's cached prefix, so this must never be made a fixed string.
-
-    Priority matches the client's intent: an explicit prompt_cache_key is never
-    overwritten; then the body's own conversation id; then the session key the
-    gateway resolved (header or conversation-prefix derived).
-    """
+    Experiment only. The key carries the uid, never a fixed string."""
     if not isinstance(body, dict):
         return body
     existing = body.get("prompt_cache_key")
@@ -305,11 +312,7 @@ def estimate_tokens(text):
 
 def turn_metadata_fields(payload):
     """Flatten the request_kind / turn_trigger / thread_source hints we get.
-
-    Codex sends them either as plain client_metadata keys or as a JSON string
-    under a metadata key of its own, so both shapes are read. Returns {} when
-    the payload carries none of them.
-    """
+    Codex sends them as client_metadata keys or as a JSON metadata string."""
     if not isinstance(payload, dict):
         return {}
     meta = payload.get("client_metadata")
@@ -335,12 +338,7 @@ def turn_metadata_fields(payload):
 
 def is_compaction_request(payload):
     """True for the operator's own "compact the context" request.
-
-    request_kind=compaction carries the same word as the background keyword, but
-    this request is one the user asked for: the client sends it on the user's
-    thread, while a compaction the client started by itself names the job that
-    started it. Refusing this one takes the context-compaction button away.
-    """
+    request_kind=compaction is user-driven, unlike the background keyword."""
     fields = turn_metadata_fields(payload)
     kind = str(fields.get("request_kind") or "").strip().lower()
     if "compact" not in kind:
@@ -350,10 +348,8 @@ def is_compaction_request(payload):
 
 
 def background_request_reason(payload):
-    """若這是 Codex 自己發的背景請求，回傳說明字串；否則回傳 ""。
-
-    只看 client_metadata，不碰訊息內容。
-    """
+    """Reason string when this is Codex's own background request, else "".
+    Only client_metadata is read; message content is never inspected."""
     fields = turn_metadata_fields(payload)
     if not fields:
         return ""
@@ -386,11 +382,8 @@ def banned_model_message(model):
 
 
 def sum_usage(total, part):
-    """把一輪的 token 用量累加起來。
-
-    代跑網路工具會多跑好幾次上游，那些 token 是真的花掉的，所以記帳要加總，
-    不能讓最後一輪蓋掉前面幾輪。
-    """
+    """Accumulate one turn's token usage.
+    Gateway-run web tools make extra upstream calls, so counts must add up."""
     if not isinstance(part, dict):
         return total
     if not isinstance(total, dict):
@@ -406,10 +399,8 @@ def sum_usage(total, part):
 
 
 def build_citations(text, sources):
-    """把模型實際引用到的來源轉成 url_citation annotations。
-
-    只標註真的有出現在工具輸出裡的網址 —— 模型自己編的連結不會被當成引用。
-    """
+    """Turn sources the model actually cited into url_citation annotations.
+    Only URLs present in tool output count; invented links never do."""
     text = str(text or "")
     if not text or not sources:
         return []
@@ -463,12 +454,7 @@ def build_citations(text, sources):
 
 def derive_affinity_key(messages):
     """Derive a stable affinity key from a conversation's stable prefix.
-    The first two messages (system + first user turn) stay byte-identical for
-    the whole life of a conversation, so hashing them pins every later turn of
-    that conversation to the same upstream account - exactly what prompt
-    caching needs. Distinct conversations differ in their first user turn and
-    therefore still spread across the pool.
-    """
+    It pins one conversation's turns to one account; others still spread."""
     if not AFFINITY_BY_PREFIX:
         return None
     try:
@@ -484,9 +470,7 @@ def derive_affinity_key(messages):
 
 def prompt_fingerprint(messages):
     """Privacy-safe fingerprint of the outgoing prompt.
-    Cache hits need a byte-identical prefix, so these hashes answer "is my
-    prefix stable / is my conversation continuous?" without storing any text.
-    """
+    Hash-only, so prefix stability can be checked without storing any text."""
     try:
         def h(obj):
             blob = json.dumps(obj, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -503,10 +487,7 @@ def prompt_fingerprint(messages):
 
 def local_web_tools_enabled():
     """Panel switch: does this gateway run web_search / web_fetch itself?
-
-    Read per request, so flipping the panel takes effect on the next one
-    without a restart.
-    """
+    Read per request, so flipping the switch needs no restart."""
     try:
         return wb_settings.local_web_tools(state.ACCOUNTS_DIR) is True
     except Exception:
@@ -515,9 +496,5 @@ def local_web_tools_enabled():
 
 def web_tools_active(body):
     """True when this request's tools were swapped for the gateway's own.
-
-    Interception only applies to a request whose definitions the gateway
-    injected: with the switch off, a client's own same-named function must be
-    forwarded instead of being swallowed here.
-    """
+    Only gateway-injected definitions are intercepted, never a client's own."""
     return isinstance(body, dict) and body.get("_web_tools") is True

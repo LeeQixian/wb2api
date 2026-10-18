@@ -34,7 +34,7 @@ def clean_chunk(raw):
     except Exception:
         return raw
     changed = False
-    # #164: a real hit must not be shadowed by zero aliases on the way out
+    # a real hit must not be shadowed by zero aliases on the way out
     if isinstance(obj.get("usage"), dict):
         before = dict(obj["usage"])
         normalize_usage_cache_aliases(obj["usage"])
@@ -42,7 +42,7 @@ def clean_chunk(raw):
             changed = True
     for choice in obj.get("choices") or []:
         if isinstance(choice, dict) and choice.get("finish_reason") == "":
-            choice["finish_reason"] = None   # strict clients trip on "" (hub #296)
+            choice["finish_reason"] = None   # strict clients trip on ""
             changed = True
         delta = choice.get("delta")
         if not isinstance(delta, dict):
@@ -72,7 +72,7 @@ def clean_chunk(raw):
 
 
 def _strip_empty_fc(obj):
-    """PATCHED-BY-OPS: 递归剔除空 function_call 占位（Responses/chat 通用）。"""
+    """PATCHED-BY-OPS: recursively drop empty function_call placeholders."""
     changed = False
     if isinstance(obj, dict):
         fc = obj.get("function_call")
@@ -94,10 +94,8 @@ def _strip_empty_fc(obj):
 
 
 def clean_responses_frame(frame):
-    """PATCHED-BY-OPS: 清洗 Responses SSE 帧（bytes）。
-    输入 b'event: x\ndata: {...}\n\n'；只改写 data: 行的 JSON，
-    event: 行原样保留。解析失败原样返回（不破坏未知格式）。
-    """
+    """PATCHED-BY-OPS: clean one Responses SSE frame (bytes).
+    Only data: line JSON is rewritten; unparsable frames pass through."""
     if not frame:
         return frame
     try:
@@ -150,7 +148,7 @@ def aggregate_stream(raw_iter, model, resp_id):
         if u:
             if usage is None or (u.get("total_tokens") or 0) >= (usage.get("total_tokens") or 0):
                 usage = u
-                normalize_usage_cache_aliases(usage)  # #164
+                normalize_usage_cache_aliases(usage)
         for choice in chunk.get("choices") or []:
             delta = choice.get("delta") or {}
             if delta.get("content"):
@@ -184,8 +182,7 @@ def aggregate_stream(raw_iter, model, resp_id):
                         entry["function"]["arguments"] = (entry["function"]["arguments"] or "") + fn_args
             fc = delta.get("function_call")
             # The upstream ends streams with an empty-name function_call;
-            # skip it, or a fake tool_call flips finish_reason to "tool_calls"
-            # and strict clients hang.
+            # skipping it keeps finish_reason from flipping to "tool_calls".
             fc_is_empty = (not isinstance(fc, dict)) or (not fc.get("name"))
             if fc and isinstance(fc, dict) and not fc_is_empty:
                 idx = 0
@@ -216,10 +213,8 @@ def aggregate_stream(raw_iter, model, resp_id):
             k: v for k, v in tool_calls_map.items()
             if (v.get("function") or {}).get("name")
         }
-    # A stream cut off by max_tokens / a dropped connection leaves the last
-    # tool call with half-written JSON. Drop those calls instead of handing
-    # the client unparsable arguments; only non-empty unparsable strings
-    # count as truncated, so no-argument tools survive (#153).
+    # A truncated stream leaves the last tool call with half-written JSON;
+    # drop it rather than hand the client unparsable arguments.
     if tool_calls_map and (finish == "length" or not saw_done):
         tool_calls_map = {
             k: v for k, v in tool_calls_map.items()

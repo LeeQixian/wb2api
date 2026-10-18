@@ -1,29 +1,5 @@
-"""wbctl - command-line account & key management (replaces the dashboard).
-
-    python3 -m gateway.wbctl [--dir accounts] <command> ...
-
-  login [--realm intl|cn]          browser OAuth device flow, waits and saves
-  import <token|file|-> [--refresh <rt>] [--realm r] [--nickname n]
-      accepts a raw accessToken JWT, a desktop .info file (nested
-      account/auth shape), or a hub accounts/*.json file (flat)
-  list                             one line per account
-  remove <uid> | enable <uid> | disable <uid>
-  refresh <uid>                    force a token refresh now
-  credits [uid]                    query balance/packages (all if uid omitted)
-  checkin <uid>                    CN realm daily checkin
-  daily-chat <uid>                 intl daily activity chat (web-channel per setting)
-  growthplan <uid>                 one-shot growth tasks (not run by the scheduler)
-  realm [intl|cn]                  read/switch the persisted global exit
-  product <uid> <workbuddy|vscode|cli>   pin the outbound identity (persisted)
-  set-switch <name> <value>        reserve-credits | daily-token-limit |
-                                   auto-switch-product | daily-chat-web |
-                                   local-web-tools | expiring-window | credits-refresh
-  set-prompt [mode] [--file f]     gateway system-prompt mode (passthrough/custom/append)
-  sync-nicknames                   fill missing account nicknames from the console
-  set-key [<key>] | clear-key      gateway API key (auth off when cleared)
-
-Exit code non-zero + a one-line stderr message on failure.
-"""
+"""wbctl - account/key/switch management for wb2api (the dashboard's replacement).
+Full command guide: USAGE.md; every subcommand documents itself in --help."""
 import argparse
 import getpass
 import os
@@ -378,14 +354,14 @@ def main(argv=None):
     p.set_defaults(fn=cmd_growthplan)
 
     p = sub.add_parser("set-prompt",
-                       help="read/set the gateway system-prompt mode (#160)")
+                       help="read/set the gateway system-prompt mode")
     p.add_argument("mode", nargs="?", choices=("passthrough", "custom", "append"),
                    default=None)
     p.add_argument("--file", default=None, help="prompt text file for custom/append")
     p.set_defaults(fn=cmd_set_prompt)
 
     p = sub.add_parser("sync-nicknames",
-                       help="fill missing nicknames from the web console (#158)")
+                       help="fill missing nicknames from the web console")
     p.set_defaults(fn=cmd_sync_nicknames)
 
     p = sub.add_parser("set-key", help="persist the gateway API key")

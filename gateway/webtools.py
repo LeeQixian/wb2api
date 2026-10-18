@@ -1,11 +1,6 @@
 # -*- coding: utf-8 -*-
 """Gateway-run web_search / web_fetch (switch: settings.local_web_tools).
-
-The upstream has no search backend, so the gateway executes these tool calls
-itself and feeds results back to the model. Backend: DuckDuckGo HTML, no API
-key. Failures return a readable error to the model; results are never faked.
-Stdlib only.
-"""
+No upstream search backend, so the gateway runs the calls itself (DuckDuckGo)."""
 
 import html as _html
 import json
@@ -119,11 +114,7 @@ def client_wants_web(tools):
 
 def install_tool_defs(chat_tools, wants):
     """Replace the client's web-tool declarations with our functions.
-
-    Remove every same-named entry first (server-side type, client function,
-    or a definition learned from us last round) so the upstream never sees two
-    web_search entries.
-    """
+    Same-named entries go first, so upstream never sees two web_search tools."""
     names = set()
     if wants.get("search"):
         names.add(WEB_SEARCH_NAME)
@@ -156,10 +147,7 @@ def is_internal_tool(name):
 
 def query_args(args):
     """Pull the query string out of the tool arguments.
-
-    Accepts query / queries / q; a queries array is joined with " or ". Reading
-    only args["query"] made array senders fail and retry to exhaustion.
-    """
+    Accepts query / queries / q; an array is joined with " or "."""
     if not isinstance(args, dict):
         return ""
     raw = args.get("query")
@@ -192,7 +180,7 @@ class _UnsafeRedirectError(Exception):
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Re-apply _guard_url to every redirect target (hub 83f3295)."""
+    """Re-apply _guard_url to every redirect target."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         target = urllib.parse.urljoin(req.full_url, str(newurl or ""))
@@ -350,10 +338,7 @@ def fetch(url, start_index=0):
 
 def sources_from_result(result):
     """Recover (title, url) pairs from the search result text.
-
-    The client needs structured sources for citations, so this parses our own
-    rendered format instead of keeping separate state.
-    """
+    Parses our own rendered format, since the client needs structured sources."""
     out = []
     pattern = r"(?m)^\d+\.\s*(.+?)\s*\n\s*(https?://\S+)\s*$"
     for m in re.finditer(pattern, str(result or "")):

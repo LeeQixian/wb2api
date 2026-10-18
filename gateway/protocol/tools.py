@@ -52,7 +52,7 @@ def parse_dsml_tool_calls(text):
 
 
 def find_namespace_tool(tools):
-    """回傳第一個 type=="namespace" 的工具名稱，沒有就回 None。"""
+    """Name of the first type=="namespace" tool, or None."""
     for t in tools or []:
         if isinstance(t, dict) and str(t.get("type") or "").lower() == "namespace":
             return str(t.get("name") or t.get("server_label") or "(unnamed)")
@@ -64,12 +64,8 @@ def _is_custom_tool(tool):
 
 
 def custom_tool_names(tools, _depth=0):
-    """Names of freeform/custom tools, recursing into namespaces (hub 23964ac).
-
-    Missing a namespaced "custom" tool makes the return path emit it as a
-    function_call; the client matches executors by (name, namespace, kind),
-    so the call then never runs and never returns.
-    """
+    """Names of freeform/custom tools, recursing into namespaces.
+    Missing one emits a function_call the client can never match."""
     names = set()
     if _depth > NAMESPACE_MAX_DEPTH:
         return names
@@ -90,10 +86,7 @@ def custom_tool_names(tools, _depth=0):
 
 def additional_tools_from_input(payload):
     """Tools carried inside input additional_tools items (Codex 0.162+).
-
-    Both the outbound conversion and the return path must read the same
-    merged list, or they see two different tool sets (hub fb10152/23964ac).
-    """
+    Outbound conversion and the return path must read the same merged list."""
     collected = []
     for item in payload.get("input") or []:
         if isinstance(item, dict) and item.get("type") == "additional_tools":
@@ -128,14 +121,8 @@ def _downgrade_custom_tool(tool):
 
 
 def expand_namespace_tools(tools, _depth=0):
-    """把 namespace 展開成 flat function 清單，其餘工具原樣保留。
-
-      * 子工具可能在 tools / children / functions 任一欄位
-      * namespace 子工具常常沒有 type 欄位，展開時補成上游認得的 flat function
-      * custom / web_search 等非 function 項目原樣留下，交給既有管線處理
-      * 同名只留第一個
-      * 回傳 (flat_tools, name_to_namespace)
-    """
+    """Flatten namespaces into a plain function list; other tools pass through.
+    Children live under tools/children/functions and often carry no type."""
     flat = []
     mapping = {}
     seen = set()
@@ -197,7 +184,7 @@ def expand_namespace_tools(tools, _depth=0):
 
 
 def resolve_namespaced_name(name, mapping):
-    """把模型回傳的名字解析回 (bare_name, namespace)。接受 js / ns__js / ns::js。"""
+    """Parse a returned name into (bare_name, namespace): js / ns__js / ns::js."""
     if not name:
         return name, ""
     name = str(name)
@@ -221,11 +208,8 @@ def resolve_namespaced_name(name, mapping):
 
 
 def stamp_namespace(item, mapping):
-    """把模型回傳的扁平工具名還原成 (name, namespace)。
-
-    串流的 response.output_item.done 事件才是客戶端派發工具呼叫的依據，
-    所以每個 function_call / custom_tool_call 項目都要在送出前補上 namespace。
-    """
+    """Restore a flat tool name into (name, namespace).
+    Clients dispatch on the streamed output_item.done, so namespace first."""
     if not mapping or not isinstance(item, dict):
         return item
     bare, ns = resolve_namespaced_name(item.get("name"), mapping)
@@ -236,7 +220,7 @@ def stamp_namespace(item, mapping):
 
 
 def apply_namespace_to_calls(output_items, mapping):
-    """替 Responses 的 function_call / custom_tool_call 補上 namespace。"""
+    """Add namespaces to Responses function_call / custom_tool_call items."""
     if not mapping or not isinstance(output_items, list):
         return output_items, 0
     fixed = 0

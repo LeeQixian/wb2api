@@ -20,13 +20,8 @@ def web_origin_for(realm):
 
 
 def fetch_account_profile(account, timeout=15):
-    """Web-console account profile -> (uid, nickname), nothing else.
-
-    The endpoint also returns phoneNumber and other personal fields; this
-    function parses only uid and nickname, so sensitive values never enter
-    logs, responses or storage. A uid mismatch against the credential raises
-    (wrong-account guard).
-    """
+    """Web-console profile -> (uid, nickname); other personal fields dropped.
+    A uid mismatch against the credential raises (wrong-account guard)."""
     origin = web_origin_for(getattr(account, "realm", ""))
     req = urllib.request.Request(
         origin + PROFILE_PATH, method="GET",
@@ -51,13 +46,8 @@ def fetch_account_profile(account, timeout=15):
 
 
 def deduction_end_text(acc):
-    """包的「抵扣截止时间」——积分到这个点就不能再抵扣，即作废时刻。
-
-    取上游的 DeductionEndTime（epoch 毫秒）。上游没给就返回空串，调用方
-    回退到 CycleEndTime。实测 Bonus Pack / 裂变包 / 体验版的 CycleEndTime
-    与 DeductionEndTime 完全一致，但免费包/体验版这类包的 CycleEndTime 只是
-    每月的计费周期边界，两者能差 8 年——所以到期要认这个字段。
-    """
+    """Upstream DeductionEndTime (ms epoch) as text; "" when missing.
+    CycleEndTime is only a billing boundary, so callers may prefer it instead."""
     raw = acc.get("DeductionEndTime")
     if raw in (None, "", 0, "0"):
         return ""
@@ -74,19 +64,8 @@ def deduction_end_text(acc):
 
 
 def credential_to_kwargs(blob, realm=None):
-    """Normalize a credential in any known shape into Account() kwargs.
-
-    Accepts three formats seen in the wild:
-      1. desktop-app .info (nested):
-         {"account": {uid, nickname, enterpriseID},
-          "auth": {accessToken, refreshToken, domain?, expiresAt?}}
-      2. hub / wb2api accounts/*.json (flat to_dict() output)
-      3. a raw accessToken JWT string
-
-    uid/nickname/enterprise are taken from the file when present and
-    decoded from the JWT otherwise; realm auto-detects from the token
-    issuer (override with `realm`).
-    """
+    """Normalize a credential (desktop .info / accounts/*.json / raw JWT).
+    Missing fields are decoded from the token; `realm` overrides the issuer."""
     if isinstance(blob, (bytes, bytearray)):
         blob = blob.decode("utf-8", "replace")
     if isinstance(blob, str):
@@ -109,7 +88,7 @@ def credential_to_kwargs(blob, realm=None):
     declared = str(blob.get("realm") or auth.get("realm") or "").strip().lower()
     detected = realm or (declared if declared in ("intl", "cn") else None) \
         or detect_realm_from_token(token, domain)
-    # #94: token evidence outranks a stale file domain for X-Domain too
+    # token evidence outranks a stale file domain for X-Domain too
     domain = domain_for_realm(detected, domain) or get_realm_config(detected)["domain"]
     cfg = get_realm_config(detected)
     return {

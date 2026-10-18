@@ -54,13 +54,10 @@ class PostRoutes(object):
 
 
     def _pin_realm(self, prefix_realm):
-        """Effective per-request exit: model-name prefix > X-Realm/?realm=.
-        None defers to upstream's model-based auto-routing. The Handler
-        instance is reused across keep-alive requests, so this recomputes
-        from scratch on every request that reaches a chat route."""
-        # None only when BOTH are absent: an explicit header still pins after
-        # a previous prefixed request on the same keep-alive connection
-        # (self._pinned_realm must never survive into that request).
+        """Effective per-request exit: model prefix > X-Realm/?realm=.
+        None defers to model-based auto-routing; recomputed per request."""
+        # None only when both are absent: _pinned_realm must never survive
+        # into an unrelated keep-alive request.
         explicit = self._request_realm()
         self._pinned_realm = prefix_realm or explicit
 
@@ -118,7 +115,7 @@ class PostRoutes(object):
         if blocked:
             return self._error(400, blocked, "invalid_request_error")
         session_key = extract_session_key(self.headers, payload)
-        # outbound and return path must see the same merged tool list (hub 23964ac)
+        # outbound and return path must see the same merged tool list
         all_tools = payload.get("tools")
         all_tools = list(all_tools) if isinstance(all_tools, list) else []
         all_tools.extend(translate.additional_tools_from_input(payload))
@@ -154,9 +151,8 @@ class PostRoutes(object):
 
 
     def open_upstream(self, payload, session_key, prebuilt=None):
-        # None when the caller did not pin a realm: upstream then routes by
-        # model (exclusive models to their own exit, shared ones to the
-        # global realm).
+        # None when the caller did not pin a realm: upstream routes by model
+        # (exclusive models to their exit, shared ones to the global realm).
         return upstream.open_upstream(_state.POOL, payload, session_key=session_key,
                                       target_realm=getattr(self, "_pinned_realm", None),
                                       log=log, prebuilt_body=prebuilt)
@@ -184,6 +180,13 @@ class PostRoutes(object):
             record_row({"model": model, "outcome": "error", "status": exc.code,
                         "error": detail[:200], "elapsed_ms": wall, "account": account_uid})
             return self._error(exc.code, "upstream %s: %s" % (exc.code, detail))
+        if isinstance(exc, upstream.LocalNetworkError):
+            record_row({"model": model, "outcome": "error", "status": 503,
+                        "error": str(exc)[:200], "elapsed_ms": wall,
+                        "account": account_uid})
+            return self._error(503, str(exc), gateway_hint=(
+                "local network unavailable: accounts were not penalised; "
+                "check this host's DNS/route/proxy"))
         message = str(exc)
         record_row({"model": model, "outcome": "error", "status": 502,
                     "error": message[:200], "elapsed_ms": wall, "account": account_uid})
@@ -379,9 +382,8 @@ class PostRoutes(object):
     def _nonstream_responses(self, upstream_resp, model, custom_names, request_meta,
                              fp, account, t_start, ns_map, base_body=None,
                              session_key=None, realm=None):
-        # Same as streaming: gateway-run web calls stay invisible until the
-        # final Responses object, or the raw function_call hits the client's
-        # unsupported-call handler.
+        # As when streaming: gateway-run web calls stay invisible until the
+        # final Responses object, never as a raw function_call.
         sources = []
         rounds = 0
         upstream = upstream_resp
