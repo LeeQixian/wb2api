@@ -29,6 +29,16 @@ from gateway.account import transport as _transport
 from gateway.common.log import log
 
 
+def _auth_failure_text(text):
+    """True for a credential-shaped 401, not an intermediate proxy page.
+    An HTML 401 from nginx/openresty must not park a healthy token (#440)."""
+    lower = str(text or "").lower()
+    if "<html" in lower:
+        return False
+    return ("401" in lower or "unauthorized" in lower or "authorization" in lower
+            or "token expired" in lower or "invalid_token" in lower)
+
+
 #: rewritten from scratch each run; never persisted.
 RUNTIME_ONLY_FIELDS = ("lastError", "cooldownUntil")
 
@@ -71,6 +81,8 @@ class Account(MaintenanceMixin):
         # Runtime-only, never restored from the credential file:
         # a persisted error outlived its 429 across restarts. save() strips it.
         self.last_error = ""
+        # Set only by a credential-shaped failure; an HTML proxy 401 never sets it.
+        self.token_expired = not token
         self.cooldown_until = 0.0
         # Per-model cooldowns: upstream 6004 rate limits bind one model, not
         # the account, so other models keep serving. Runtime-only.
@@ -295,6 +307,9 @@ class Account(MaintenanceMixin):
     def ready(self, model=None, allow_refresh=True):
         if not self.enabled or not self.access_token:
             return False
+        if self.token_expired and not (allow_refresh and self.refresh()):
+            # A dead credential only comes back through a successful refresh.
+            return False
         if self.throttle_wait(model=model) > 0:
             return False
         # Parked below the reserve: serving a request here is what would push
@@ -345,7 +360,7 @@ class Account(MaintenanceMixin):
         if self.daily_limit_blocked():
             return "daily token limit reached"
         exp = self.expires_at or jwt_exp(self.access_token)
-        if exp and exp - now <= 120:
+        if self.token_expired or (exp and exp - now <= 120):
             return "credential expired"
         return ""
 
@@ -438,6 +453,7 @@ class Account(MaintenanceMixin):
 
     def _refresh_locked(self):
         if not self.refresh_token:
+            self.token_expired = True
             self._set_last_error("no refresh token; sign in again")
             return False
         cfg = get_realm_config(self.realm)
@@ -462,17 +478,23 @@ class Account(MaintenanceMixin):
             payload = _transport.http_json(url, data=b"{}", method="POST", headers=headers, timeout=30,
                                 proxy=self.proxy)
         except Exception as exc:
-            self._set_last_error("refresh failed: %s" % exc)
+            if _auth_failure_text(exc):
+                self.token_expired = True
+                self._set_last_error("refresh rejected (401); sign in again")
+            else:
+                self._set_last_error("refresh failed: %s" % exc)
             return False
         data = (payload.get("data") or {})
         data = data.get("data") or data
         token = data.get("accessToken")
         if not token:
+            self.token_expired = True
             self._set_last_error("refresh returned no token (%s)" % payload.get("msg"))
             return False
         self.access_token = token
         self.refresh_token = data.get("refreshToken") or self.refresh_token
         self.expires_at = jwt_exp(token) or self.expires_at
+        self.token_expired = False
         with self._throttle_lock:
             self.last_error = ""
             self.cooldown_until = 0
@@ -773,13 +795,15 @@ class Account(MaintenanceMixin):
             self.cooldown_until = 0.0
 
     def _set_last_error(self, message):
-        """Record refresh errors alongside the state shown in the panel."""
+        """Record a refresh error in the account's runtime state."""
         with self._throttle_lock:
             self.last_error = str(message)[:200]
 
     def note_error(self, message, cooldown=60, single_account=False, model=None, until=None):
         with self._throttle_lock:
             self.last_error = str(message)[:200]
+            if _auth_failure_text(message):
+                self.token_expired = True
             if model:
                 # Model-scoped: the account stays usable for every other model.
                 wait = max(1.0, float(until) - time.time()) if until else (

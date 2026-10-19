@@ -37,12 +37,11 @@ through to `account/transport.py`.
 - **Backoff ladder.** Account-level 429 doubles 10min -> 2h; three consecutive
   hard failures trip a 30min -> 6h breaker; five unknown failures degrade
   10min -> 2h. One success clears everything.
+- **A 401 does not by itself mean the credential is dead.** Only a token-shaped
+  failure marks `token_expired` (a middle-layer HTML 401 page does not); the
+  flag gates dispatch and forces a lazy refresh, instead of parking the account.
 - **`AccountPool.resolve()`** accepts a full uid, a unique uid prefix, or a
   unique nickname; an ambiguous reference is an error, never a silent pick.
-
-## Unresolved
-
-- `model.py` is the broadest file; split only if a clean seam appears.
 
 ## Config
 

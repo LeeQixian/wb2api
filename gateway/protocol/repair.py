@@ -129,7 +129,6 @@ def repack_tool_result_blocks(messages):
         i += 1
         results = []
         between = []
-        saw_non_tool = False
         while i < len(messages):
             mm = messages[i]
             if not isinstance(mm, dict):
@@ -140,22 +139,21 @@ def repack_tool_result_blocks(messages):
                 if not (isinstance(tid, str) and tid in want):
                     break
                 results.append(mm)
-                if saw_non_tool:
-                    changed = True
                 i += 1
                 continue
-            if not results:
-                break
-            # A following assistant.tool_calls opens the next batch: it must go
-            # back to the outer loop, or its own results never get repacked.
-            if role == "assistant" and isinstance(mm.get("tool_calls"), list) \
-                    and mm["tool_calls"]:
+            # Any assistant message ends the batch; anything else is an
+            # intruder (before or between results) moved behind the batch.
+            if role == "assistant":
                 break
             between.append(mm)
-            saw_non_tool = True
             i += 1
-        out.extend(results)
-        out.extend(between)
+        if results:
+            out.extend(results)
+            out.extend(between)
+            if between:
+                changed = True
+        else:
+            out.extend(between)
     if not changed:
         return messages, False
     return out, True

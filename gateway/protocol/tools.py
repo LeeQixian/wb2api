@@ -6,6 +6,7 @@ import re
 import uuid
 from gateway.common.ids import new_id as _new_id
 from gateway.common.log import log
+from gateway.protocol import sanitize
 
 
 TAG_START = r"<[^>]*DSML[^>]*"
@@ -153,6 +154,8 @@ def expand_namespace_tools(tools, _depth=0):
                     "parameters": entry.get("parameters") or entry.get("input_schema")
                                   or {"type": "object", "properties": {}},
                 }
+                if sanitize.preserve_request_contract_enabled() and "strict" in entry:
+                    fn["strict"] = entry["strict"]
             name = str(fn.get("name") or "").strip()
             if not name or name in seen:
                 return

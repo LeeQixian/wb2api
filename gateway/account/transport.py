@@ -1,6 +1,7 @@
 """HTTP transport with retry, proxy support and keep-alive pool fallback."""
 
 import json
+import time
 import ssl
 import threading
 import urllib.error
@@ -19,6 +20,9 @@ def _upstream_pool():
 
 def _retryable(exc):
     """Transient network faults worth another attempt (TLS resets, timeouts, 5xx)."""
+    from gateway.upstream.retry import is_tls_verify_error
+    if is_tls_verify_error(exc):
+        return False
     if isinstance(exc, ssl.SSLError):
         return True
     if isinstance(exc, urllib.error.HTTPError):

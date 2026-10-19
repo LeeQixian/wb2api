@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 
+from gateway import settings as wb_settings
 from gateway import tasks as wb_tasks
 from gateway.tasks.travel import do_cat_travel
 
@@ -37,6 +38,7 @@ class Scheduler:
         self._offsets = {}
         self._last_fired = set()  # "YYYY-MM-DD HH" markers, in-process dedupe
         self._load_state()
+        self._reload_schedule()
         self._ensure_today_offsets()
         # Surface task-level failures (dead endpoints, upstream shape changes)
         # in the same log.
@@ -98,6 +100,30 @@ class Scheduler:
         self._offset_day = day
         self._save_state()
 
+    def _reload_schedule(self):
+        """Re-read settings.json hours; keep the current grid on any failure.
+        load() is cached by (path, mtime, size), so this stays a stat."""
+        directory = getattr(self.pool, "dir", "") or ""
+        if not directory:
+            return False
+        try:
+            hours = wb_settings.schedule_hours(directory)
+        except Exception:
+            return False
+        changed = (hours["checkin"] != self.checkin_hours
+                   or hours["travel"] != self.travel_hours
+                   or hours["keepalive"] != self.keepalive_hours
+                   or hours["cat"] != self.cat_hours)
+        self.checkin_hours = hours["checkin"]
+        self.travel_hours = hours["travel"]
+        self.keepalive_hours = hours["keepalive"]
+        self.cat_hours = hours["cat"]
+        self.all_hours = sorted(set(self.checkin_hours + self.travel_hours
+                                    + self.keepalive_hours + self.cat_hours))
+        if changed:
+            self._ensure_today_offsets()
+        return changed
+
     def _fire_minute(self, hour):
         """Absolute minute-of-day when `hour`:00 fires today (offset applied)."""
         self._ensure_today_offsets()
@@ -136,6 +162,8 @@ class Scheduler:
 
     def _check_due(self):
         """Poll every 30s; fire when now matches an (hour, offset) minute."""
+        if self._reload_schedule():
+            self._calc_next_fire()
         now = time.localtime()
         minute = now.tm_hour * 60 + now.tm_min
         day = time.strftime("%Y-%m-%d")

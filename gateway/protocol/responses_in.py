@@ -7,6 +7,7 @@ from gateway import webtools as wb_webtools
 from gateway.common.log import log
 from gateway.protocol.model_info import model_default_max_output_tokens
 from gateway.protocol.request import local_web_tools_enabled
+from gateway.protocol.sanitize import preserve_request_contract_enabled
 from gateway.protocol.tools import (additional_tools_from_input, expand_namespace_tools, _tools_for_chat)
 
 
@@ -261,6 +262,21 @@ def responses_to_chat(payload):
     """Translate a Responses API request body into a Chat Completions body."""
     messages = _responses_input_to_messages(payload)
     chat = {"model": payload.get("model"), "messages": messages}
+    if preserve_request_contract_enabled():
+        # Responses text.format is the client's structured-output contract.
+        text = payload.get("text")
+        fmt = text.get("format") if isinstance(text, dict) else None
+        if isinstance(fmt, dict):
+            kind = fmt.get("type")
+            if kind in ("text", "json_object"):
+                chat["response_format"] = {"type": kind}
+            elif kind == "json_schema":
+                chat["response_format"] = {
+                    "type": kind,
+                    "json_schema": {key: fmt[key] for key in
+                                    ("name", "description", "schema", "strict")
+                                    if key in fmt},
+                }
     for key in ("temperature", "top_p", "seed"):
         if payload.get(key) is not None:
             chat[key] = payload[key]

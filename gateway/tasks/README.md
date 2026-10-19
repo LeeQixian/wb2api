@@ -37,13 +37,11 @@ scheduler.
   cadence is itself a signature.
 - **Enterprise accounts are skipped silently** (no personal growth system).
 
-## Unresolved
-
-- `run_growth_tasks` and `run_night_growth` both encode task-spec knowledge
-  from `base.py`; a spec change must be reflected in both.
-
 ## Config
 
 - `--tasks` enables the scheduler.
+- `schedule.checkin/travel/keepalive/cat` - the firing hours, read from
+  `accounts/settings.json`; the scheduler re-reads them every tick (no restart)
+  and per-row invalid values fall back to the built-in grid.
 - `daily_chat_web` selects the intl daily-activity channel.
 - Env: `WB_WEB_TURN_TIMEOUT`.

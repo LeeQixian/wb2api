@@ -16,7 +16,7 @@ from gateway.upstream.state import (  # noqa: F401
     _POOL, ACCOUNTS_DIR, USAGE_DIR, _lock,
 )
 from gateway.upstream.errors import ContentRejected, RateLimited  # noqa: F401
-from gateway.upstream.retry import LocalNetworkError  # noqa: F401
+from gateway.upstream.retry import LocalNetworkError, TLSVerifyError  # noqa: F401
 from gateway.upstream.guards import (  # noqa: F401
     _daily_usage, apply_daily_token_limit, auto_switch_product_enabled,
     daily_tokens_by_account, usage_log_path,

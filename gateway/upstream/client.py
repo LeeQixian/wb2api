@@ -55,6 +55,10 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
     turn_request_id = wb_identity.new_turn_request_id()
     total = max(1, pool.count_ready(realm, model=model)) if pool else 1
     tried = set()
+    # A 401 can mean the access token died before its JWT clock did: refresh
+    # once per account per request, then retry that same account (#439).
+    refreshed_uids = set()
+    refresh_uid = None
     last_error = None
     last_uid = None
     last_429 = None
@@ -68,12 +72,16 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
     # retry would be pure overhead.
     auto_switch = AUTO_SWITCH_PRODUCT or auto_switch_product_enabled(pool)
     max_attempts = max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0)
-    # Panel parity: header/idle timeouts are read once per request,
-    # never inside the retry loop.
+    # Read once per request, never inside the retry loop.
     header_timeout, idle_timeout = upstream_timeouts(getattr(pool, "dir", None))
     for _attempt in range(max_attempts):
-        account = pool.pick_for_session(realm=realm, session_key=session_key,
-                                        exclude=tried, model=model) if pool else None
+        if refresh_uid is not None:
+            # The post-refresh retry targets exactly the account just refreshed.
+            account = pool.get(refresh_uid) if pool else None
+            refresh_uid = None
+        else:
+            account = pool.pick_for_session(realm=realm, session_key=session_key,
+                                            exclude=tried, model=model) if pool else None
         if account is None:
             if transient_hits and _attempt < max_attempts - 1:
                 tried.clear()
@@ -99,7 +107,7 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
             attempt_body = {k: v for k, v in attempt_body.items()
                             if k not in wb_identity.CLI_BODY_DROP_FIELDS}
             attempt_body["cache_retention"] = wb_identity.CLI_CACHE_RETENTION
-        attempt_data = json.dumps(attempt_body, ensure_ascii=False).encode("utf-8")
+        attempt_data = retry.encode_upstream_body(attempt_body)
         if cli_identity or vscode_identity:
             attempt_data = wb_identity.gzip_body(attempt_data)
         if session_key:
@@ -117,6 +125,9 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
             req_headers["Content-Encoding"] = wb_identity.REQUEST_CONTENT_ENCODING
         req = urllib.request.Request(chat_url, data=attempt_data, method="POST",
                                      headers=req_headers)
+        # Header-name fidelity: Request capitalizes names; the pool sends these
+        # ordered pairs verbatim on the chat wire (#429).
+        req.wb_exact_headers = list(req_headers.items())
         try:
             resp = wb_accounts.urlopen(req, timeout=header_timeout,
                                        proxy=account.proxy)
@@ -211,9 +222,24 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
                 last_error = exc
                 continue
             if exc.code == 401:
-                log("account %s rejected (HTTP 401), rotating" % account.uid[:8])
                 if session_key and pool:
                     pool.affinity.unbind(session_key)
+                if account.uid not in refreshed_uids:
+                    refreshed_uids.add(account.uid)
+                    try:
+                        refreshed_ok = account.refresh()
+                    except Exception as refresh_exc:
+                        refreshed_ok = False
+                        log("account %s: token refresh after 401 failed: %s"
+                            % (account.uid[:8], exc_detail(refresh_exc, 160)))
+                    if refreshed_ok:
+                        log("account %s: HTTP 401, token refreshed; retrying the same account"
+                            % account.uid[:8])
+                        tried.discard(account.uid)
+                        refresh_uid = account.uid
+                        last_error = exc
+                        continue
+                log("account %s rejected (HTTP 401), rotating" % account.uid[:8])
                 account.note_error("HTTP 401",
                                    cooldown=60,
                                    single_account=(total <= 1))
@@ -230,6 +256,11 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
                 continue
             raise
         except Exception as exc:
+            if retry.is_tls_verify_error(exc):
+                # The chain is the same for every account: one attempt is
+                # enough; retrying only multiplies failed handshakes (#441).
+                last_error = exc
+                break
             if session_key and pool:
                 pool.affinity.unbind(session_key)
             if looks_like_local_network(exc):
@@ -266,6 +297,10 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
             last_error.account_uid = last_uid
         except Exception:
             pass
+        if retry.is_tls_verify_error(last_error):
+            exc = retry.TLSVerifyError(retry.tls_verify_hint(last_error))
+            exc.account_uid = last_uid
+            raise exc
         if looks_like_local_network(last_error):
             # Report "host has no network", never "upstream unreachable".
             exc = LocalNetworkError(exc_detail(last_error))

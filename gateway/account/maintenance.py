@@ -196,8 +196,11 @@ class MaintenanceMixin(object):
             "reasoning_effort": "none",
         }
         req_body = wb_proxy.build_upstream_body(body)
-        data = json.dumps(req_body, ensure_ascii=False).encode("utf-8")
+        # Same outbound wire shape as open_upstream: compact JSON, verbatim names.
+        from gateway.upstream import retry as wb_retry
+        data = wb_retry.encode_upstream_body(req_body)
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        req.wb_exact_headers = list(headers.items())
         try:
             with _transport.urlopen(req, timeout=20, proxy=self.proxy) as resp:
                 _ = resp.read()

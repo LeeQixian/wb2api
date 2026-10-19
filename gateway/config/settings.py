@@ -1,4 +1,4 @@
-"""Runtime settings: optional API key plus panel switches (accounts/settings.json).
+"""Runtime settings: optional API key plus the guard switches (accounts/settings.json).
 No key lets every request through; with one, /v1 routes need the Bearer header."""
 import hmac
 import json
@@ -289,3 +289,47 @@ def set_credits_refresh_hours(directory, value):
     data["credits_refresh_hours"] = value
     save(directory, data)
     return value
+
+
+#: Background schedule hours (CST); identical to the old hardcoded grid.
+DEFAULT_SCHEDULE_HOURS = {
+    "checkin": [9, 21],
+    "travel": [9, 21],
+    "keepalive": [22],
+    "cat": [1],
+}
+SCHEDULE_KEYS = ("checkin", "travel", "keepalive", "cat")
+
+
+def _normalize_hours(value):
+    """Coerce a list / comma string into sorted unique hours 0-23, or None."""
+    if isinstance(value, str):
+        raw = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        raw = list(value)
+    else:
+        return None
+    out = set()
+    for item in raw:
+        if isinstance(item, bool):
+            continue
+        try:
+            hour = int(str(item).strip())
+        except (TypeError, ValueError):
+            continue
+        if 0 <= hour <= 23:
+            out.add(hour)
+    return sorted(out) if out else None
+
+
+def schedule_hours(directory):
+    """Schedule hours per key; invalid or missing entries fall back per key.
+    A hand-edited settings.json must never stop the scheduler."""
+    raw = load(directory).get("schedule")
+    if not isinstance(raw, dict):
+        raw = {}
+    out = {}
+    for key in SCHEDULE_KEYS:
+        hours = _normalize_hours(raw.get(key))
+        out[key] = hours if hours is not None else list(DEFAULT_SCHEDULE_HOURS[key])
+    return out

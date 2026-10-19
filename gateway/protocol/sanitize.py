@@ -2,7 +2,15 @@
 
 
 import json
+import os
 import re
+
+
+def preserve_request_contract_enabled():
+    """Opt-in WB_PRESERVE_REQUEST_CONTRACT: keep client data verbatim where
+    sanitization would rewrite it; upstream repairs still apply."""
+    return os.environ.get("WB_PRESERVE_REQUEST_CONTRACT", "0").strip().lower() in (
+        "1", "true", "yes", "on")
 
 
 SANITIZE_FEATURES = (
@@ -88,6 +96,9 @@ def sanitize_content(content):
 
 
 def sanitize_tool_calls(tool_calls):
+    # Arguments are application data, not a client fingerprint.
+    if preserve_request_contract_enabled():
+        return tool_calls
     if not isinstance(tool_calls, list):
         return tool_calls
     out = []
@@ -121,7 +132,9 @@ def sanitize_messages(messages):
     for m in messages or []:
         if isinstance(m, dict):
             item = dict(m)
-            if "content" in item:
+            keep_result = (preserve_request_contract_enabled()
+                           and item.get("role") in ("tool", "function"))
+            if "content" in item and not keep_result:
                 item["content"] = sanitize_content(item["content"])
             if isinstance(item.get("reasoning_content"), str):
                 item["reasoning_content"] = sanitize_text(item["reasoning_content"])

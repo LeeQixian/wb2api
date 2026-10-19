@@ -41,4 +41,5 @@ package.
 | `credits_refresh_hours` | 12 | background credit refresh staleness |
 | `upstream.header_timeout_seconds` | 120 | first-byte timeout |
 | `upstream.idle_timeout_seconds` | 300 | stream idle timeout |
+| `schedule.checkin` / `.travel` / `.keepalive` / `.cat` | 9,21 / 9,21 / 22 / 1 | scheduler hours (local CST); invalid values fall back per key |
 | `prompt.mode` / `prompt.file` | passthrough | system-prompt mode |

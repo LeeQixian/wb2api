@@ -1,6 +1,7 @@
 
 
 import base64
+import hashlib
 import http.client
 import io
 import os
@@ -13,7 +14,7 @@ import urllib.request
 
 
 # -*- coding: utf-8 -*-
-"""Upstream keep-alive connection pool, keyed by (scheme, host, port, proxy).
+"""Upstream keep-alive pool, keyed by (scheme, host, port, proxy, credential).
 
 Reuses http.client connections instead of urllib's do_open, which hardcodes
 Connection: close and pays a fresh TCP+TLS handshake per request.
@@ -22,7 +23,8 @@ Never pools (raises PoolBypass; callers fall back to urllib): non-http(s)
 URLs, non-HTTP proxies, and any 3xx response (redirect handling stays in
 urllib). Toggle off with WB_UPSTREAM_KEEPALIVE=0; sizes via
 WB_UPSTREAM_POOL_SIZE / WB_UPSTREAM_POOL_IDLE. Stale connections are swept
-across every pool key on reuse, not only the touched key.
+across every pool key on reuse, not only the touched key. Two accounts never
+share one TCP/TLS connection: the credential digest is the last key dimension.
 """
 
 #: Values of WB_UPSTREAM_KEEPALIVE that disable the pool; anything else is on.
@@ -30,6 +32,67 @@ _KEEPALIVE_OFF = ("0", "off", "false", "no")
 
 #: Cap on error-body reads; larger bodies are not read and the connection dropped.
 _ERROR_BODY_MAX = 1024 * 1024
+
+_SSL_CONTEXT = None
+_SSL_CONTEXT_KEY = None
+_SSL_CONTEXT_LOCK = threading.Lock()
+
+
+def ca_bundle_path():
+    """PEM bundle for a private TLS chain; WB_CA_BUNDLE wins over SSL_CERT_FILE.
+    A set-but-missing WB_CA_BUNDLE is a config error, never a silent fallback."""
+    for name in ("WB_CA_BUNDLE", "SSL_CERT_FILE"):
+        raw = os.environ.get(name)
+        if not raw or not str(raw).strip():
+            continue
+        path = os.path.abspath(os.path.expanduser(str(raw).strip()))
+        if os.path.isfile(path):
+            return path
+        if name == "WB_CA_BUNDLE":
+            raise RuntimeError("%s points to a missing file: %s" % (name, path))
+        # OpenSSL ignores a missing SSL_CERT_FILE; keep that leftover harmless.
+    return ""
+
+
+# The pool builds its own context, but urllib still serves fallback paths;
+# exporting through the variable OpenSSL understands keeps both trust sets.
+if os.environ.get("WB_CA_BUNDLE"):
+    _ca = ca_bundle_path()
+    if _ca:
+        os.environ["SSL_CERT_FILE"] = _ca
+
+
+def _resolve_ssl_factory():
+    """(identity, builder) of the context http.client would make by default.
+    Tracking the seam lets tests swap the default and invalidate the cache."""
+    factory = getattr(http.client, "_create_https_context", None)
+    if factory is not None:
+        return factory, (lambda: factory(None))
+    factory = getattr(ssl, "_create_default_https_context", None)
+    if factory is not None:
+        return factory, factory
+    return ssl.create_default_context, ssl.create_default_context
+
+
+def shared_ssl_context():
+    """Process-wide TLS context: per-connection rebuild costs ~20ms and drops
+    session resumption; verification settings stay exactly stdlib's defaults."""
+    global _SSL_CONTEXT, _SSL_CONTEXT_KEY
+    ident, build = _resolve_ssl_factory()
+    key = (ident, ca_bundle_path())
+    if _SSL_CONTEXT is None or _SSL_CONTEXT_KEY != key:
+        with _SSL_CONTEXT_LOCK:
+            ident, build = _resolve_ssl_factory()
+            key = (ident, ca_bundle_path())
+            if _SSL_CONTEXT is None or _SSL_CONTEXT_KEY != key:
+                if key[1]:
+                    # Keep system roots and add the private bundle on top.
+                    _SSL_CONTEXT = ssl.create_default_context()
+                    _SSL_CONTEXT.load_verify_locations(cafile=key[1])
+                else:
+                    _SSL_CONTEXT = build()
+                _SSL_CONTEXT_KEY = key
+    return _SSL_CONTEXT
 
 
 def enabled():
@@ -379,7 +442,9 @@ def _new_connection(scheme, host, port, proxy_info, timeout):
         proxy_port = int(proxy_info["port"]) if proxy_info["port"] else (
             443 if scheme == "https" else 80)
         if scheme == "https":
-            conn = _PooledHTTPSConnection(proxy_info["host"], proxy_port, timeout=timeout)
+            conn = _PooledHTTPSConnection(proxy_info["host"], proxy_port,
+                                          timeout=timeout,
+                                          context=shared_ssl_context())
             tunnel_headers = {}
             auth = _proxy_auth_header(proxy_info)
             if auth:
@@ -389,7 +454,8 @@ def _new_connection(scheme, host, port, proxy_info, timeout):
             return conn
         return _PooledHTTPConnection(proxy_info["host"], proxy_port, timeout=timeout)
     if scheme == "https":
-        return _PooledHTTPSConnection(host, port, timeout=timeout)
+        return _PooledHTTPSConnection(host, port, timeout=timeout,
+                                      context=shared_ssl_context())
     return _PooledHTTPConnection(host, port, timeout=timeout)
 
 
@@ -401,37 +467,87 @@ def _host_header_value(url):
     return netloc
 
 
-def _request_headers(req, scheme, proxy_info):
-    """Build request headers the way urllib do_open does.
-    Only difference: Connection: keep-alive instead of close; order matches."""
+#: Pool-key identity fields; the first present one isolates accounts.
+_IDENTITY_HEADER_FIELDS = ("authorization", "x-refresh-token", "x-user-id")
+
+
+def _header_lookup(pairs):
+    """Fold (name, value) pairs into {lower name: first value}."""
+    lookup = {}
+    for name, value in pairs:
+        key = str(name).strip().lower()
+        if key not in lookup and value:
+            lookup[key] = value
+    return lookup
+
+
+def _identity_discriminator(req, ordered_headers=None):
+    """Credential digest for the pool key; '' when the request has no credential.
+    Two accounts on one exit must never share a connection (#429)."""
+    pairs = ordered_headers if ordered_headers is not None else list(req.headers.items())
+    lookup = _header_lookup(pairs)
+    for field in _IDENTITY_HEADER_FIELDS:
+        value = lookup.get(field)
+        if value:
+            digest = hashlib.sha256(
+                ("%s\0%s" % (field, value)).encode("utf-8")).hexdigest()[:16]
+            return "%s:%s" % (field, digest)
+    return ""
+
+
+def _exact_header_pairs(headers):
+    """Normalize caller-supplied ordered headers to [(name, value)]; None keeps default."""
+    if headers is None:
+        return None
+    if hasattr(headers, "items"):
+        return list(headers.items())
+    return list(headers)
+
+
+def _request_headers(req, scheme, proxy_info, ordered_headers=None):
+    """Wire headers as urllib do_open builds them, plus Connection: keep-alive.
+    ordered_headers: send those names verbatim (no .title()); chat path only."""
     headers = dict(req.unredirected_hdrs)
     data = req.data
+    ordered_names = None
+    if ordered_headers is not None:
+        ordered_names = {str(name).strip().lower() for name, _value in ordered_headers}
     if data is not None:
         # do_request_ default: add a form Content-type when a body lacks one.
-        if not req.has_header("Content-type"):
+        if not req.has_header("Content-type") and not (
+                ordered_names is not None and "content-type" in ordered_names):
             headers["Content-type"] = "application/x-www-form-urlencoded"
         # Content-Length is left to http.client._send_request, which places it
         # exactly where urllib would.
-    if not req.has_header("Host"):
+    if not req.has_header("Host") and not (
+            ordered_names is not None and "host" in ordered_names):
         headers["Host"] = _host_header_value(req.full_url)
-    if not req.has_header("User-agent"):
+    if not req.has_header("User-agent") and not (
+            ordered_names is not None and "user-agent" in ordered_names):
         # Fallback UA for the default opener; every caller passes one explicitly.
         headers["User-agent"] = "Python-urllib/%s" % urllib.request.__version__
-    headers.update(req.headers)
+    if ordered_headers is None:
+        headers.update(req.headers)
+    else:
+        for name, value in ordered_headers:
+            headers[name] = value
     if proxy_info and scheme == "http":
         # HTTP via proxy: auth rides the request; HTTPS carries it in CONNECT.
         auth = _proxy_auth_header(proxy_info)
         if auth:
             headers["Proxy-authorization"] = auth
     headers["Connection"] = "keep-alive"
+    if ordered_headers is not None:
+        return headers
     return {name.title(): value for name, value in headers.items()}
 
 
-def _exchange(conn, req, selector, scheme, proxy_info, key, reused):
+def _exchange(conn, req, selector, scheme, proxy_info, key, reused,
+              ordered_headers=None):
     """Run one request/response exchange; returns a release-aware response.
     Raises _StaleConnection (retry once), _TransportFailure, or other errors."""
     method = req.get_method()
-    headers = _request_headers(req, scheme, proxy_info)
+    headers = _request_headers(req, scheme, proxy_info, ordered_headers)
     try:
         conn.request(method, selector, req.data, headers,
                      encode_chunked=req.has_header("Transfer-encoding"))
@@ -487,7 +603,8 @@ def egress_key(url, proxy=""):
 
 def urlopen(req, timeout=30, proxy=""):
     """Pooled urlopen; signature matches gateway.accounts.urlopen.
-    Retries once when a pooled connection was peer-closed (nothing was sent)."""
+    Retries once when a pooled connection was peer-closed (nothing was sent).
+    req.wb_exact_headers: ordered pairs sent with verbatim names (chat path)."""
     scheme, host, port, selector = _target_parts(req.full_url)
     proxy_raw = str(proxy or "").strip()
     # A bypassed host is direct (its key is the direct pool), matching urllib.
@@ -495,9 +612,11 @@ def urlopen(req, timeout=30, proxy=""):
     if proxy_info and scheme == "http":
         # HTTP via proxy: the request target is the absolute URL (as urllib).
         selector = req.full_url
-    # Key by (target, proxy string): different exits never share a connection,
-    # even when the proxy address matches but the string differs.
-    key = (scheme, host, port, proxy_raw)
+    ordered_headers = _exact_header_pairs(getattr(req, "wb_exact_headers", None))
+    # Key by (target, proxy, credential): different exits never share a
+    # connection; different accounts on one exit never share either.
+    key = (scheme, host, port, proxy_raw,
+           _identity_discriminator(req, ordered_headers))
 
     def factory():
         return _new_connection(scheme, host, port, proxy_info, timeout)
@@ -509,7 +628,8 @@ def urlopen(req, timeout=30, proxy=""):
     retried = False
     while True:
         try:
-            resp = _exchange(conn, req, selector, scheme, proxy_info, key, reused)
+            resp = _exchange(conn, req, selector, scheme, proxy_info, key, reused,
+                             ordered_headers)
         except _StaleConnection as stale:
             _POOL.discard(conn)
             if reused and replayable and not retried:

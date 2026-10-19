@@ -41,12 +41,15 @@ writes of the mutable state names go through to `protocol/state.py`, so
   answers "unsupported call".
 - **Custom (freeform) tools become a single-string function** outbound and are
   re-inflated to `custom_tool_call` inbound.
-
-## Unresolved
-
-- `responses_out.stream_responses_events` and
-  `responses_in._responses_input_to_messages` are large single functions; any
-  split needs its own test pass.
+- **Tool schemas are normalized recursively.** Type aliases (`str`/`int`/
+  `dict`), null metadata, tuple-form `items`, `required` and `$defs`/`anyOf`
+  bodies are all rewritten in place; a nested definition is validated too.
+- **A `tool_result` batch is packed adjacent to its `tool_calls`.** The
+  upstream rejects an intruding message between them (11148), so a non-result
+  message before or inside the batch is moved behind the whole batch.
+- **`WB_PRESERVE_REQUEST_CONTRACT=1` skips fingerprint sanitizing**
+  (tool arguments and tool results verbatim, `strict` kept on namespace
+  sub-tools) and maps Responses `text.format` onto `response_format`.
 
 ## Config
 

@@ -39,7 +39,7 @@ def _mask_signals():
 
 def _parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description="wb2api minimal WorkBuddy -> OpenAI gateway (no dashboard)")
+        description="wb2api minimal WorkBuddy -> OpenAI gateway")
     ap.add_argument("--host", default=os.environ.get("HOST") or "127.0.0.1")
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT") or "8788"))
     ap.add_argument("--api-key", default=None,

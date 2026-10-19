@@ -180,6 +180,12 @@ class PostRoutes(object):
             record_row({"model": model, "outcome": "error", "status": exc.code,
                         "error": detail[:200], "elapsed_ms": wall, "account": account_uid})
             return self._error(exc.code, "upstream %s: %s" % (exc.code, detail))
+        if isinstance(exc, upstream.TLSVerifyError):
+            # The hint names the file/variable to fix; no retry will help.
+            record_row({"model": model, "outcome": "error", "status": 502,
+                        "error": str(exc)[:200], "elapsed_ms": wall,
+                        "account": account_uid})
+            return self._error(502, str(exc))
         if isinstance(exc, upstream.LocalNetworkError):
             record_row({"model": model, "outcome": "error", "status": 503,
                         "error": str(exc)[:200], "elapsed_ms": wall,

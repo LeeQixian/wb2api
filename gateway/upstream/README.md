@@ -7,9 +7,9 @@ connection pool, the live model catalogue and the dispatch guards.
 
 - `client.py` - `open_upstream()`: pick an account, send the request, and run
   the retry/rotation loop on failure.
-- `pool.py` - a keep-alive connection pool that reuses `http.client`
-  connections (urllib hardcodes `Connection: close`, so every request would
-  otherwise pay a fresh TCP+TLS handshake).
+- `pool.py` - a keep-alive connection pool keyed by (scheme, host, port,
+  proxy, credential digest): two accounts never share one TCP/TLS connection.
+  Chat requests carry `wb_exact_headers` so header names go out verbatim.
 - `catalog.py` - fetch the live `/v3/config` catalogue, merge it over the
   bundled snapshot, and curate the advertised model list.
 - `realm.py` - the active exit (intl/cn): read, switch and persist.
@@ -35,14 +35,15 @@ the shared state go through to `upstream/state.py`.
   connection; a request the peer may have processed is never retried.
 - **A stuck stream does not hold a slot forever**: a first-byte timeout and a
   stream-idle timeout both apply.
-
-## Unresolved
-
-- The identity auto-switch rotates in a fixed order with no per-identity
-  health tracking beyond the round counter.
+- **A 401 refreshes the account's token once before rotating**; only a failed
+  refresh or a second 401 moves on. A certificate-verification failure is a
+  config error: no retry, and the answer names WB_CA_BUNDLE.
+- **Chat bodies are compact JSON** (`encode_upstream_body`), matching Node's
+  `JSON.stringify`; other paths keep urllib defaults.
 
 ## Config
 
 - `upstream.header_timeout_seconds`, `upstream.idle_timeout_seconds`.
 - `daily_token_limit`, `auto_switch_product` (see `account/README.md`).
-- Env: `WB_UPSTREAM_KEEPALIVE`, `WB_UPSTREAM_POOL_SIZE`, `WB_UPSTREAM_POOL_IDLE`.
+- Env: `WB_UPSTREAM_KEEPALIVE`, `WB_UPSTREAM_POOL_SIZE`, `WB_UPSTREAM_POOL_IDLE`,
+  `WB_CA_BUNDLE` / `SSL_CERT_FILE` (private root CA bundle).

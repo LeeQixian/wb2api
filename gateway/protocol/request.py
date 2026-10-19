@@ -155,9 +155,86 @@ def normalize_tool_choice(obj):
         obj.pop("tool_choice", None)
 
 
+#: Schema type aliases some clients send instead of JSON Schema names.
+_SCHEMA_TYPE_MAP = {
+    "str": "string", "text": "string", "int": "integer", "bool": "boolean",
+    "dict": "object", "list": "array", "float": "number",
+}
+_SCHEMA_VALID_TYPES = {"string", "number", "integer", "boolean", "array",
+                       "object", "null"}
+#: Null-valued metadata the upstream Go validator rejects outright.
+_SCHEMA_NULL_DROP_KEYS = ("description", "title", "format", "pattern",
+                          "items", "default")
+
+
+def _deep_normalize_schema(s):
+    """Recursively repair a JSON Schema for the upstream validator (11129/11101)."""
+    if not isinstance(s, dict):
+        return s
+    for k in list(s.keys()):
+        if s[k] is None and k in _SCHEMA_NULL_DROP_KEYS:
+            s.pop(k, None)
+    if "type" in s:
+        typ = s["type"]
+        if isinstance(typ, str):
+            low = typ.strip().lower()
+            if low in _SCHEMA_TYPE_MAP:
+                s["type"] = _SCHEMA_TYPE_MAP[low]
+            elif low not in _SCHEMA_VALID_TYPES:
+                if "properties" in s:
+                    s["type"] = "object"
+                elif "items" in s:
+                    s["type"] = "array"
+                else:
+                    s.pop("type", None)
+            else:
+                s["type"] = low
+        elif isinstance(typ, list):
+            s["type"] = [_SCHEMA_TYPE_MAP.get(str(t).lower(), str(t).lower())
+                         for t in typ if t]
+    if s.get("type") == "object" or ("properties" in s and s.get("type") is None):
+        if s.get("type") is None:
+            s["type"] = "object"
+        if not isinstance(s.get("properties"), dict):
+            s["properties"] = {}
+    if "required" in s:
+        req = s["required"]
+        if isinstance(req, list):
+            cleaned = [str(x) for x in req if x is not None and str(x).strip()]
+            if cleaned:
+                s["required"] = cleaned
+            else:
+                s.pop("required", None)
+        elif isinstance(req, str) and req.strip():
+            s["required"] = [req.strip()]
+        else:
+            s.pop("required", None)
+    if "items" in s:
+        items = s["items"]
+        if isinstance(items, list):
+            first = next((it for it in items if isinstance(it, dict)), None)
+            s["items"] = _deep_normalize_schema(dict(first)) if first else {"type": "string"}
+        elif isinstance(items, dict):
+            _deep_normalize_schema(items)
+        else:
+            s.pop("items", None)
+    if isinstance(s.get("properties"), dict):
+        for prop_val in s["properties"].values():
+            _deep_normalize_schema(prop_val)
+    for def_key in ("$defs", "definitions"):
+        if isinstance(s.get(def_key), dict):
+            for d_val in s[def_key].values():
+                _deep_normalize_schema(d_val)
+    for comb_key in ("anyOf", "oneOf", "allOf"):
+        if isinstance(s.get(comb_key), list):
+            for sub in s[comb_key]:
+                _deep_normalize_schema(sub)
+    return s
+
+
 def _normalize_tool_parameters(fn):
     """Repair function.parameters so upstream schema validation accepts it.
-    `parameters: {}` and a missing type:"object" are 400 / code 11129."""
+    Root must be object-typed; nested defects fixed by _deep_normalize_schema."""
     if not isinstance(fn, dict):
         return
     params = fn.get("parameters")
@@ -169,14 +246,7 @@ def _normalize_tool_parameters(fn):
         p["type"] = "object"
     if "properties" not in p or not isinstance(p.get("properties"), dict):
         p["properties"] = {}
-    if "required" in p:
-        req = p["required"]
-        if isinstance(req, list):
-            p["required"] = [str(x) for x in req if x is not None]
-        elif isinstance(req, str):
-            p["required"] = [req]
-        else:
-            p.pop("required", None)
+    _deep_normalize_schema(p)
     fn["parameters"] = p
 
 
@@ -486,7 +556,7 @@ def prompt_fingerprint(messages):
 
 
 def local_web_tools_enabled():
-    """Panel switch: does this gateway run web_search / web_fetch itself?
+    """Does this gateway run web_search / web_fetch itself?
     Read per request, so flipping the switch needs no restart."""
     try:
         return wb_settings.local_web_tools(state.ACCOUNTS_DIR) is True

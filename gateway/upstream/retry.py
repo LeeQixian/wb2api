@@ -12,6 +12,43 @@ from gateway import settings as wb_settings
 from gateway.common.log import log
 
 
+#: Markers of a deterministic certificate/hostname failure (#441).
+_TLS_VERIFY_MARKERS = (
+    "certificate_verify_failed", "certificate verify failed",
+    "self-signed certificate", "self signed certificate",
+    "unable to get local issuer certificate", "unable to get issuer certificate",
+    "certificate has expired", "hostname mismatch",
+)
+
+
+class TLSVerifyError(RuntimeError):
+    """The upstream certificate chain is not trusted by this process."""
+
+
+def tls_verify_hint(exc=None):
+    """Actionable hint naming WB_CA_BUNDLE; appends the raw error when given."""
+    hint = ("upstream TLS certificate failed verification (corporate/MITM proxy "
+            "or missing root CA); export the signing root CA to PEM and set "
+            "WB_CA_BUNDLE=/path/to/ca.pem, or SSL_CERT_FILE, then restart")
+    return hint if exc is None else "%s; original error: %s" % (hint, exc)
+
+
+def is_tls_verify_error(exc):
+    """True for cert/hostname failures; checks URLError.reason too.
+    These are config errors: retrying repeats them and hides the cause."""
+    reason = getattr(exc, "reason", None)
+    text = "%s %s %s" % (type(exc).__name__, exc, "" if reason is None else reason)
+    lower = text.lower()
+    return any(marker in lower for marker in _TLS_VERIFY_MARKERS)
+
+
+def encode_upstream_body(body):
+    """Serialize a chat body like Node JSON.stringify: compact, no ASCII escape.
+    Default separators leave spaces that fingerprint every outbound request."""
+    return json.dumps(body, ensure_ascii=False,
+                      separators=(",", ":")).encode("utf-8")
+
+
 AUTO_SWITCH_PRODUCT = os.environ.get("WB_AUTO_SWITCH_PRODUCT",
                                      "0").lower() in ("1", "true", "yes", "on")
 MAX_PRODUCT_SWITCHES = 4
@@ -122,6 +159,8 @@ def is_transient(exc):
         "connectionabortederror", "timed out", "timeout", "temporarily unavailable",
         "bad gateway", "502", "503", "504", "incompleteread",
     )
+    if is_tls_verify_error(exc):
+        return False
     return any(m in t for m in markers)
 
 # DNS/route failures also arrive as URLError, but no account ever sent a

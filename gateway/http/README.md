@@ -31,11 +31,6 @@ arguments and wires everything up. `gateway/common/log.py` is the shared sink.
   read whole before parsing.
 - **Concurrent chats are bounded** by a semaphore (`WB_MAX_CONCURRENT_CHAT`).
 
-## Unresolved
-
-- Routing is a hand-written dispatch in `routes/*`; adding a route means
-  editing `do_GET` / `do_POST`.
-
 ## Config
 
 - `--host`, `--port`, `--api-key`, `--realm`, `--tasks`, `--cors`,

@@ -1,4 +1,4 @@
-"""wbctl - account/key/switch management for wb2api (the dashboard's replacement).
+"""wbctl - account/key/switch management for wb2api.
 Full command guide: USAGE.md; every subcommand documents itself in --help."""
 import argparse
 import getpass
@@ -219,6 +219,7 @@ _SWITCHES = {
     "local-web-tools": (settings.set_local_web_tools, settings.local_web_tools),
     "expiring-window": (settings.set_expiring_window_days, settings.expiring_window_days),
     "credits-refresh": (settings.set_credits_refresh_hours, settings.credits_refresh_hours),
+    "schedule-hours": (None, settings.schedule_hours),
 }
 
 
@@ -243,6 +244,10 @@ def cmd_set_switch(args):
     raw = args.value
     if args.name in ("auto-switch-product", "daily-chat-web", "local-web-tools"):
         raw = _as_bool(raw)
+    if args.name == "schedule-hours":
+        print("read-only here; edit accounts/settings.json \"schedule\" directly",
+              file=sys.stderr)
+        return 1
     setter(args.dir, raw)
     print("%s = %r" % (args.name, getter(args.dir)))
     return 0

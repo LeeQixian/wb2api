@@ -111,6 +111,10 @@ python3 -m gateway.wbctl credits
 **`daily-chat <uid>`** —— 国际版账号的每日活跃对话（官方给 30/50 积分的羊毛）。
 默认会多走一次网页通道会话——实测只有跑完的网页 agent 会话才算数，纯 API 对话不计。
 
+**`growthplan <uid>`** —— 手动跑一遍一次性成长任务（接受 / 点亮 / 领取），跑完打印
+earned 和逐条日志。这些任务**不在** `--tasks` 的自动调度里，只能这样手动触发；
+企业账号没有成长系统，会被跳过。
+
 **`sync-nicknames`** —— 导入的账号没名字？这条从网页控制台把昵称拉回来，
 不用重新登录。只取昵称，别的个人信息一概不要。
 
@@ -128,9 +132,9 @@ python3 -m gateway.wbctl realm cn      # 切到国内版
 
 ### 出站身份
 
-**`product <uid> <workbuddy|vscode|cli>`** —— 高级用法，一般不用碰。一个账号可以
-伪装成三种官方客户端发请求，被限流时这是三条独立配额线。切了会落盘、重启保持。
-不知道这是干嘛的就别动，默认 workbuddy 就行。
+**`product <uid> <workbuddy|vscode|cli>`** —— 一个账号可以伪装成三种官方客户端发请求，
+被限流时这是三条独立配额线。切了会落盘、重启保持，默认 workbuddy。
+名字还接受别名 `wb` / `desktop` / `vsc` / `ide` / `codebuddy`。
 
 ### 开关（settings）
 
@@ -141,7 +145,7 @@ python3 -m gateway.wbctl realm cn      # 切到国内版
 python3 -m gateway.wbctl set-switch                       # 名字打错会列出全部合法值
 ```
 
-| 名字 | 默认 | 开了会怎样 |
+| 名字 | 默认 | 作用 |
 |---|---|---|
 | `reserve-credits <数字>` | 0（关） | 余额 ≤ 该值的账号停止派单。防账号被用到零（到零上游会发催命短信） |
 | `daily-token-limit <数字>` | 0（关） | 单账号当日 token 用量到上限就休息到第二天零点；全池都到上限时返回 429 |
@@ -150,6 +154,12 @@ python3 -m gateway.wbctl set-switch                       # 名字打错会列�
 | `local-web-tools on/off` | off | 模型说"我要搜索"时由你的网关自己去搜（DuckDuckGo，无需 key）并回喂模型。开了意味着网关会访问模型给的任意网址，自用再开 |
 | `expiring-window <天数>` | 7 | 积分快过期的账号优先派单，先把要作废的花掉。0=关闭，纯轮流 |
 | `credits-refresh <小时>` | 12 | 后台积分刷新频率（只在 `--tasks` 时运行）。0=关 |
+| `schedule-hours` | 只读 | 看当前排程时段（默认签到旅行 9/21 · 保活 22 · 夜猫 1）。改时段要编辑 `settings.json` 的 `schedule` 段，调度器每轮热加载、不用重启 |
+
+这几个之外的 `settings.json` 键没有 `set-switch` 名字：`upstream.header_timeout_seconds` /
+`upstream.idle_timeout_seconds`（首包与流空闲超时）、`schedule.*`、`prompt.mode` /
+`prompt.file`（后者用 `wbctl set-prompt`）。直接编辑 `accounts/settings.json`，除
+`schedule` 外都要重启网关才生效。
 
 ### 密钥
 
@@ -171,8 +181,6 @@ python3 -m gateway.wbctl set-switch                       # 名字打错会列�
   不指定就用内置的一段中文工程助手提示词）
 - `append`：客户端 system 保留，在其后追加网关的提示词
 
-日常自用不需要动它。
-
 ---
 
 ## 三、server 启动参数
@@ -182,12 +190,14 @@ python3 -m gateway.wbctl set-switch                       # 名字打错会列�
 
 | 参数 | 干什么 | 什么时候用 |
 |---|---|---|
-| `--api-key sk-xxx` | 顺手把访问密码设了（等价 wbctl set-key） | 想让请求带密码 |
+| `--api-key sk-xxx` | 顺手把访问密码设了（等价 `wbctl set-key`；传空字符串则清除它） | 想让请求带密码 |
 | `--port 9000` | 换端口 | 8788 被占 |
-| `--realm cn` | 指定本次启动的默认出口 | 想固定走国内版 |
-| `--tasks` | 打开后台自动调度：国内版签到/成长任务/猫猫旅行 + 国际版日活 + token 保活 | 想全自动薅积分。默认关，关着=纯网关 |
+| `--realm cn` | 切换默认出口并落盘（等价 `wbctl realm cn`） | 想固定走国内版 |
+| `--tasks` | 打开后台自动调度：国内版签到/猫猫旅行/夜猫子任务 + 国际版日活 + token 保活 | 想全自动薅积分。默认关，关着=纯网关。一次性成长任务不在这里，用 `wbctl growthplan <uid>` 手动跑 |
 | `--cors` | 允许浏览器网页直接跨域调本地网关 | 只有网页版客户端直连本机时才需要 |
 | `--host 0.0.0.0` | 监听所有网卡 | 局域网给别的设备用——先想清楚，必须配合 --api-key |
+| `--system-prompt` / `--system-prompt-file` | 指定 passthrough 的占位文本，或 custom/append 用的提示词文本 | 配合 `set-prompt custom/append` |
+| `--hide` | 忽略 `SIGTERM/SIGINT` 等，只认 `SIGRTMIN+4` | 交给 systemd 管（见本机 LOCAL.md）；前台调试别加 |
 | `--accounts-dir` / `--usage-dir` | 换数据目录 | 一般不用 |
 
 想让网关在后台常驻（关掉终端也不死）：
@@ -227,28 +237,3 @@ curl -s http://127.0.0.1:8788/v1/chat/completions \
 
 接自己的工具时，工具的 base URL 一律填 `http://127.0.0.1:8788/v1`（注意带 `/v1`），
 API key 填你 set-key 的值。
-
----
-
-## 五、出问题怎么办
-
-| 现象 | 原因 | 怎么办 |
-|---|---|---|
-| `401 invalid api key` | 网关设了密码 | 请求带 `Authorization: Bearer <key>`；忘了就 `wbctl clear-key` 重设 |
-| `503 no usable account` | 池里没有可用号 | `wbctl list` 看 ready 列；n 的 `refresh`，全 off 的 `enable`，没有号就 `login` |
-| `400 模型 xxx 只在xx提供` | 出口冲突 | `cn:hy3` 这种前缀或 X-Realm 指到了该模型没有的出口；去掉前缀或换出口 |
-| `429` + Retry-After | 被上游限流或触发了自己的限额 | 按提示等；常发就把 `daily-token-limit` 设上、并发降下来 |
-| `413 payload too large` | 单次请求体超过 16MB 上限 | 响应里的 `gateway_hint` 会指明 `WB_MAX_PAYLOAD_BYTES`；调大后重启网关 |
-| list 里 ready=n | token 死了 | `wbctl refresh <uid>`；刷不动就重新 `login` |
-| 客户端连不上 | 分不清谁的锅 | 先 `curl /health`：通=客户端配置问题（base URL 有没有带 `/v1`）；不通=网关没起来，看它的终端输出 |
-| 改了 realm/开关没生效 | 正在跑的网关是启动时读的 | 重启网关，或对单次请求用 `cn:`/`global:` 前缀 |
-
----
-
-## 六、必须知道的三件事
-
-1. `accounts/` 目录里是明文账号凭据，等同把钥匙挂在门上。不 commit、不云同步、
-   不发任何人。`.gitignore` 已经挡了，别去改它。
-2. 默认只监听 127.0.0.1，局域网和公网都摸不到。改 `--host 0.0.0.0` 之前先设 key。
-3. 上游是真有风控的：多号同 IP、高并发、批量薅积分都会提高封号概率。低频自用、
-   `--tasks` 不开，是最稳的姿势。这工具不提供任何账号和额度，只给你自己的合法账号用。
