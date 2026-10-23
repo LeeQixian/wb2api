@@ -4,10 +4,12 @@ from gateway import identity as wb_identity
 
 
 
+import errno
 import json
 import os
 import re
 import socket
+import urllib.error
 from gateway import settings as wb_settings
 from gateway.common.log import log
 
@@ -149,19 +151,91 @@ def realm_model_throttled(realm, model, pool=None):
     return (False, 0)
 
 
+def _network_error_details(exc):
+    """Wrapped OS error codes plus text, independent of the host's locale."""
+    errors = (exc, getattr(exc, "reason", None))
+    text = " ".join("%s %s" % (type(error).__name__, error)
+                    for error in errors if error is not None).lower()
+    # HTTPError inherits OSError but delegates missing attrs to its response on
+    # Python 3.9; HTTP status is not an OS code, so never probe it.
+    codes = {getattr(error, attr, None) for error in errors
+             if not isinstance(error, urllib.error.HTTPError)
+             for attr in ("errno", "winerror")}
+    # Some callers keep only a string; match the whole number, since the old
+    # substring "errno 100" also matched Windows ECONNRESET (10054).
+    codes.update(int(code) for code in re.findall(
+        r"\b(?:errno|winerror)\s+(-?\d+)\b", text))
+    return codes, text
+
+
 def is_transient(exc):
     """Network-level flakiness that deserves a retry, not a cooldown.
     Dropped TLS handshakes must not take an account offline."""
-    t = ("%s %s" % (type(exc).__name__, exc)).lower()
+    if is_tls_verify_error(exc):
+        return False
+    codes, t = _network_error_details(exc)
+    # ECONNREFUSED (10061) stays out on purpose: nothing is listening, which
+    # usually means a dead per-account proxy; it keeps the charge+cooldown path.
+    if codes.intersection((errno.EPIPE, errno.ECONNABORTED, errno.ECONNRESET,
+                           errno.ETIMEDOUT, 10053, 10054, 10060)):
+        return True
     markers = (
         "ssl", "unexpected_eof", "eof occurred", "remote end closed",
         "connection reset", "connection aborted", "connectionreseterror",
         "connectionabortederror", "timed out", "timeout", "temporarily unavailable",
         "bad gateway", "502", "503", "504", "incompleteread",
     )
-    if is_tls_verify_error(exc):
-        return False
     return any(m in t for m in markers)
+
+# Upstream bodies that name the model/service, not the credential: 11134 model
+# provider unavailable, 11102 service info not found, 11150 unsupported effort,
+# 11158 model not available, 11129 invalid function parameters.
+MODEL_SCOPED_ERROR_CODES = frozenset((11102, 11129, 11134, 11150, 11158))
+
+
+def upstream_error_code(detail):
+    """The numeric code field of an upstream error body, or None."""
+    try:
+        payload = json.loads(detail or "")
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return int(payload.get("code"))
+    except (TypeError, ValueError):
+        return None
+
+
+def http_error_detail(exc, limit=600):
+    """Read an HTTPError body once and keep it on the exception for later readers."""
+    try:
+        raw = exc.read(limit)
+    except Exception:
+        return ""
+    try:
+        exc.wb_body = raw
+    except Exception:
+        pass
+    return raw.decode("utf-8", "replace")
+
+
+def read_http_error(exc, limit=600):
+    """The body cached by http_error_detail, or a fresh read."""
+    raw = getattr(exc, "wb_body", None)
+    if raw is not None:
+        return raw[:limit]
+    try:
+        return exc.read(limit)
+    except Exception:
+        return b""
+
+
+def model_scoped_errors_penalize_account():
+    """Escape hatch: restore "any 5xx charges the account"."""
+    raw = os.environ.get("WB_MODEL_SCOPED_ERRORS_PENALIZE", "")
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
 
 # DNS/route failures also arrive as URLError, but no account ever sent a
 # byte; these fingerprints identify "this host has no network" first.
@@ -169,8 +243,6 @@ LOCAL_NETWORK_MARKERS = (
     "gaierror", "getaddrinfo failed", "name or service not known",
     "nodename nor servname", "temporary failure in name resolution",
     "network is unreachable", "network is down", "no route to host",
-    "errno -2", "errno -3", "errno -5", "errno 100", "errno 101", "errno 113",
-    "winerror 11001", "winerror 10050", "winerror 10051", "winerror 10065",
 )
 
 
@@ -178,9 +250,11 @@ def looks_like_local_network(exc):
     """True when the host itself lost DNS/route, not the upstream."""
     if isinstance(exc, socket.gaierror):
         return True
-    reason = getattr(exc, "reason", None)
-    text = "%s %s %s" % (type(exc).__name__, exc, "" if reason is None else reason)
-    lower = text.lower()
+    codes, lower = _network_error_details(exc)
+    if codes.intersection((errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH,
+                           -2, -3, -5, 100, 101, 113,
+                           10050, 10051, 10065, 11001)):
+        return True
     return any(marker in lower for marker in LOCAL_NETWORK_MARKERS)
 
 

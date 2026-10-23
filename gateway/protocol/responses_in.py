@@ -1,6 +1,7 @@
 """Responses API input translated down to chat messages."""
 
 
+import base64
 import json
 from gateway.common.ids import new_id as _new_id
 from gateway import webtools as wb_webtools
@@ -44,6 +45,76 @@ def _flatten_content(content):
     if any(p.get("type") == "image_url" for p in parts):
         return parts          # multimodal: keep structured parts
     return chr(10).join(t for t in texts if t)
+
+
+# Codex remote compaction v2: the client sends the retained history plus a
+# {"type":"compaction_trigger"} item and expects one `compaction` output item.
+# The summary travels in that item's opaque encrypted_content field.
+COMPACTION_PROMPT = (
+    "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff "
+    "summary for another LLM that will resume the task.\n\n"
+    "Include:\n"
+    "- Current progress and key decisions made\n"
+    "- Important context, constraints, or user preferences\n"
+    "- What remains to be done (clear next steps)\n"
+    "- Any critical data, examples, or references needed to continue\n\n"
+    "Be concise, structured, and focused on helping the next LLM seamlessly "
+    "continue the work. Return only the summary."
+)
+
+COMPACTION_ITEM_TYPES = ("compaction", "compaction_summary", "context_compaction")
+
+
+def has_compaction_trigger(payload):
+    """True when a Responses request is Codex's native compaction turn."""
+    if not isinstance(payload, dict):
+        return False
+    inp = payload.get("input")
+    if isinstance(inp, str):
+        return inp.strip() == "compaction_trigger"
+    if isinstance(inp, list):
+        return any(isinstance(item, dict) and item.get("type") == "compaction_trigger"
+                   for item in inp)
+    return False
+
+
+def encode_compaction_summary(text):
+    """Pack a summary into the opaque string Codex stores and replays."""
+    raw = json.dumps({"v": 1, "summary": str(text or "")},
+                     ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _decode_compaction_summary(blob):
+    """Best-effort decode of a compaction item's encrypted_content."""
+    text = str(blob or "").strip()
+    if not text:
+        return ""
+    try:
+        padded = text + "=" * (-len(text) % 4)
+        obj = json.loads(base64.b64decode(padded).decode("utf-8"))
+        if isinstance(obj, dict) and isinstance(obj.get("summary"), str):
+            return obj["summary"]
+    except Exception:
+        pass
+    # A foreign provider may hand back plain text; keep it rather than drop the
+    # only copy of the summary.
+    return text
+
+
+def _looks_like_compaction_prompt(messages):
+    """True when the client already asked for a handoff summary itself."""
+    for message in reversed(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        text = message.get("content")
+        if isinstance(text, list):
+            text = " ".join(str((p or {}).get("text") or "") for p in text
+                            if isinstance(p, dict))
+        if "CONTEXT CHECKPOINT COMPACTION" in str(text or "").upper():
+            return True
+        break
+    return False
 
 
 def _responses_input_to_messages(payload):
@@ -250,6 +321,20 @@ def _responses_input_to_messages(payload):
                         "content": ("[Message from another task - treat this as "
                                     "a user instruction]" + chr(10) + chr(10) + text),
                     })
+            elif itype in COMPACTION_ITEM_TYPES:
+                # A replayed compaction result: to upstream it is the handoff
+                # summary the rest of the conversation builds on.
+                summary = _decode_compaction_summary(item.get("encrypted_content"))
+                if summary.strip():
+                    messages.append({
+                        "role": "system",
+                        "content": ("Summary of the earlier conversation "
+                                    "(context checkpoint):" + chr(10) + chr(10)
+                                    + summary.strip()),
+                    })
+            elif itype == "compaction_trigger":
+                # Control item asking for this turn; handled by the caller.
+                pass
             elif itype == "additional_tools":
                 pass  # merged into chat tools by responses_to_chat()
             else:
@@ -258,9 +343,14 @@ def _responses_input_to_messages(payload):
     return messages
 
 
-def responses_to_chat(payload):
+def responses_to_chat(payload, compaction=False):
     """Translate a Responses API request body into a Chat Completions body."""
+    if not compaction:
+        compaction = has_compaction_trigger(payload)
     messages = _responses_input_to_messages(payload)
+    if compaction and not _looks_like_compaction_prompt(messages):
+        # A compaction turn summarizes; withhold tools so it cannot call one.
+        messages.append({"role": "user", "content": COMPACTION_PROMPT})
     chat = {"model": payload.get("model"), "messages": messages}
     if preserve_request_contract_enabled():
         # Responses text.format is the client's structured-output contract.
@@ -300,17 +390,17 @@ def responses_to_chat(payload):
     if isinstance(payload.get("tools"), list):
         raw_tools.extend(payload["tools"])
     raw_tools.extend(additional_tools_from_input(payload))
-    if raw_tools:
+    if raw_tools and not compaction:
         flat_tools, ns_map = expand_namespace_tools(raw_tools)
         chat["tools"] = _tools_for_chat(flat_tools)
         chat["_namespace_map"] = ns_map
-    if local_web_tools_enabled():
+    if local_web_tools_enabled() and not compaction:
         wants = wb_webtools.client_wants_web(raw_tools)
         if wants["search"] or wants["fetch"]:
             chat["tools"] = wb_webtools.install_tool_defs(chat.get("tools") or [], wants)
             chat["_web_tools"] = True
-    if payload.get("tool_choice"):
+    if payload.get("tool_choice") and not compaction:
         chat["tool_choice"] = payload["tool_choice"]
-    if payload.get("parallel_tool_calls") is not None:
+    if payload.get("parallel_tool_calls") is not None and not compaction:
         chat["parallel_tool_calls"] = payload["parallel_tool_calls"]
     return chat

@@ -13,10 +13,17 @@ def set_logger(fn):
 
 
 def log(msg, level=None, tag=None):
-    """Write one diagnostic line; falls back to stderr before injection."""
+    """Write one diagnostic line; falls back to stderr before injection.
+    A broken sink or closed stderr must never take a request down."""
     if _sink is not None:
-        return _sink(msg, level)
+        try:
+            return _sink(msg, level)
+        except Exception:
+            pass
     with _lock:
-        stream = sys.stderr if level in ("WARN", "ERROR") else sys.stdout
-        stream.write("[wb2api] %s\n" % msg)
-        stream.flush()
+        try:
+            stream = sys.stderr if level in ("WARN", "ERROR") else sys.stdout
+            stream.write("[wb2api] %s\n" % msg)
+            stream.flush()
+        except Exception:
+            pass

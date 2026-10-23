@@ -75,7 +75,8 @@ def credential_to_kwargs(blob, realm=None):
         raise ValueError("credential must be a JWT string or a JSON object")
     auth = blob.get("auth") if isinstance(blob.get("auth"), dict) else {}
     prof = blob.get("account") if isinstance(blob.get("account"), dict) else {}
-    token = str(blob.get("accessToken") or auth.get("accessToken") or "").strip()
+    token = str(blob.get("accessToken") or blob.get("access_token")
+                or auth.get("accessToken") or auth.get("access_token") or "").strip()
     if not token or token.count(".") < 2:
         raise ValueError("no JWT accessToken found in the credential")
     uid = str(blob.get("uid") or prof.get("uid") or jwt_uid(token) or "")

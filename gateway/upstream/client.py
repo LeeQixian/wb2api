@@ -34,8 +34,78 @@ AFFINITY_DEBUG = os.environ.get("WB_AFFINITY_DEBUG", "0").lower() in (
     "1", "true", "yes", "on")
 
 
+# Optional per-account concurrency cap (account_max_concurrent, 0 = unlimited).
+# Upstream meters tokens per account per minute, so piling conversations onto one
+# account earns a 429 and loses its prefix cache.
+_ACCOUNT_INFLIGHT = {}
+_ACCOUNT_INFLIGHT_LOCK = threading.Lock()
+ACCOUNT_SLOT_WAIT_MAX = 2.0
+
+
+def account_slot_acquire(account, limit):
+    """Take one in-flight slot for this account; True when it was free."""
+    if limit <= 0:
+        return True
+    with _ACCOUNT_INFLIGHT_LOCK:
+        current = _ACCOUNT_INFLIGHT.get(account.uid, 0)
+        if current >= limit:
+            return False
+        _ACCOUNT_INFLIGHT[account.uid] = current + 1
+        return True
+
+
+def account_slot_release(account):
+    """Return a slot; a no-op when the cap is off."""
+    if account is None:
+        return
+    with _ACCOUNT_INFLIGHT_LOCK:
+        current = _ACCOUNT_INFLIGHT.get(account.uid, 0)
+        if current <= 1:
+            _ACCOUNT_INFLIGHT.pop(account.uid, None)
+        else:
+            _ACCOUNT_INFLIGHT[account.uid] = current - 1
+
+
+def bind_account_slot_to_response(response, account):
+    """Release the slot when the upstream body is closed, not at header time."""
+    if account is None:
+        return
+    if response is None:
+        account_slot_release(account)
+        return
+    released = [False]
+
+    def release_once():
+        if not released[0]:
+            released[0] = True
+            account_slot_release(account)
+
+    try:
+        original_close = response.close
+    except Exception:
+        release_once()
+        return
+
+    def close_and_release(*args, **kwargs):
+        try:
+            return original_close(*args, **kwargs)
+        finally:
+            release_once()
+
+    try:
+        response.close = close_and_release
+    except Exception:
+        release_once()
+
+
+def account_inflight_snapshot():
+    """{uid: in-flight count} for diagnostics."""
+    with _ACCOUNT_INFLIGHT_LOCK:
+        return dict(_ACCOUNT_INFLIGHT)
+
+
 def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
-                  prebuilt_body=None):
+                  prebuilt_body=None, pin_account=None):
     """Pick an account and open the upstream chat stream; (response, account).
     Raises RateLimited / ContentRejected / HTTPError / RuntimeError."""
     apply_daily_token_limit(pool)
@@ -74,26 +144,71 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
     max_attempts = max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0)
     # Read once per request, never inside the retry loop.
     header_timeout, idle_timeout = upstream_timeouts(getattr(pool, "dir", None))
+    # A pinned account serves the first attempt only; later attempts rotate.
+    pin_uid = pin_account.uid if pin_account is not None else None
+    slot_limit = wb_settings.account_max_concurrent(
+        getattr(pool, "dir", None) or _state.ACCOUNTS_DIR)
+    # busy = "full right now", never a failure: it must not affect the breaker.
+    busy = set()
+    slot_held = None
+
+    def pick_account():
+        while True:
+            candidate = pool.pick_for_session(realm=realm, session_key=session_key,
+                                              exclude=tried | busy,
+                                              model=model) if pool else None
+            if candidate is None:
+                return None
+            if account_slot_acquire(candidate, slot_limit):
+                return candidate
+            busy.add(candidate.uid)
+            if len(busy) >= max(1, total):
+                return None
+
+    def wait_slot(account):
+        """A pinned account has no alternative: wait a bounded time for a slot."""
+        if account is None:
+            return None
+        got = account_slot_acquire(account, slot_limit)
+        waited = 0.0
+        while not got and waited < ACCOUNT_SLOT_WAIT_MAX:
+            time.sleep(0.05)
+            waited += 0.05
+            got = account_slot_acquire(account, slot_limit)
+        return account if got else None
+
     for _attempt in range(max_attempts):
+        # Any path that did not hand the response out gives the slot back here.
+        if slot_held is not None:
+            account_slot_release(slot_held)
+            slot_held = None
         if refresh_uid is not None:
             # The post-refresh retry targets exactly the account just refreshed.
-            account = pool.get(refresh_uid) if pool else None
+            account = wait_slot(pool.get(refresh_uid) if pool else None)
             refresh_uid = None
+        elif pin_uid is not None:
+            account = wait_slot((pool.get(pin_uid) if pool else None) or pin_account)
+            pin_uid = None
         else:
-            account = pool.pick_for_session(realm=realm, session_key=session_key,
-                                            exclude=tried, model=model) if pool else None
+            account = pick_account()
         if account is None:
-            if transient_hits and _attempt < max_attempts - 1:
+            if (pin_account is None and (transient_hits or local_net_hits)
+                    and _attempt < max_attempts - 1):
+                # Rotation is bookkeeping, not an upstream attempt: re-pick in
+                # this iteration so a small pool keeps its retry budget.
                 tried.clear()
-                time.sleep(min(1.5 * transient_hits, 3.0))
-                continue
-            break
+                time.sleep(min(1.5 * (transient_hits or local_net_hits), 3.0))
+                account = pick_account()
+            if account is None:
+                break
         if account.realm != realm:
+            account_slot_release(account)
             if session_key and pool:
                 pool.affinity.unbind(session_key)
             continue
         tried.add(account.uid)
         last_uid = account.uid
+        slot_held = account
         chat_url = account.chat_base_url() + CHAT_PATH
         if prompt_cache_key_enabled():
             attempt_body = inject_prompt_cache_key(upstream_body, account.uid, session_key)
@@ -136,11 +251,14 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
             # (soft streak, breaker, degrade) along with the model park.
             account.note_success(model=model)
             reset_switch_counter(account, model)
+            # The slot stays held until the body is closed, not the headers.
+            bind_account_slot_to_response(resp, account)
+            slot_held = None
             return resp, account
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 try:
-                    detail = exc.read(600).decode("utf-8", "replace")
+                    detail = retry.read_http_error(exc, 600).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
                 reset_at = parse_rate_limit_reset(detail)
@@ -186,7 +304,7 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
                 continue
             if exc.code == 403:
                 try:
-                    detail = exc.read(600).decode("utf-8", "replace")
+                    detail = retry.read_http_error(exc, 600).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
                 if restriction_is_account_level(detail):
@@ -211,7 +329,7 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
                 break
             if exc.code == 402:
                 try:
-                    detail = exc.read(400).decode("utf-8", "replace")
+                    detail = retry.read_http_error(exc, 400).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
                 account.note_balance_cooled(detail or "HTTP 402 (insufficient credits)")
@@ -246,10 +364,21 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
                 last_error = exc
                 continue
             if exc.code >= 500:
+                detail = retry.http_error_detail(exc)
+                code = retry.upstream_error_code(detail)
+                if (code in retry.MODEL_SCOPED_ERROR_CODES
+                        and not retry.model_scoped_errors_penalize_account()):
+                    # A bad model name must not take the whole pool down: stop
+                    # rotating and hand the upstream body back unchanged.
+                    log("upstream %s for '%s' (code %s, model-scoped); "
+                        "not charging the account" % (exc.code, model, code))
+                    last_error = exc
+                    break
                 transient_hits += 1
                 account.note_failure("HTTP %d" % exc.code)
-                log("upstream %s for '%s' on %s, retrying (fails=%d)"
-                    % (exc.code, model, account.uid[:8], account.fails))
+                log("upstream %s for '%s' on %s (code %s), retrying (fails=%d)"
+                    % (exc.code, model, account.uid[:8],
+                       code if code is not None else "-", account.fails))
                 if session_key and pool:
                     pool.affinity.unbind(session_key)
                 last_error = exc
@@ -290,6 +419,9 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
                 % (account.uid[:8], detail, cooldown, account.fails, total))
             last_error = exc
             continue
+    if slot_held is not None:
+        account_slot_release(slot_held)
+        slot_held = None
     if last_error is not None:
         # Carry the failing account out to the caller, because the local
         # variable that would have held it was never assigned there.
@@ -319,6 +451,13 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
     throttled, wait = realm_model_throttled(realm, model, pool)
     if throttled:
         raise RateLimited(None, "usage exceeds frequency limit", wait=wait)
+    if busy:
+        # Every account is healthy, just serving its cap: say so instead of
+        # blaming account state.
+        reason = ("every usable account is already serving %d concurrent "
+                  "request(s) (account_max_concurrent=%d); retry shortly or "
+                  "raise the cap" % (slot_limit, slot_limit))
+        raise RateLimited(None, reason, wait=1, message=reason)
     enabled = [a for a in (pool.accounts if pool else [])
                if a.realm == realm and a.enabled and a.access_token]
     if enabled and all(a.daily_limit_blocked() for a in enabled):

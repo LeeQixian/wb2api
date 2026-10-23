@@ -13,6 +13,40 @@ from gateway.tasks.travel import do_cat_travel
 
 STATE_NAME = "scheduler-state.json"
 
+# Lead must exceed the 24h sweep interval, else most expiries are seen late.
+KEEPALIVE_LEAD_DEFAULT_HOURS = 48.0
+KEEPALIVE_LEAD_MIN_HOURS = 1.0
+KEEPALIVE_LEAD_MAX_HOURS = 24.0 * 30
+
+
+def keepalive_lead_seconds():
+    """Lead time in seconds; invalid WB_KEEPALIVE_LEAD_HOURS falls back to default."""
+    raw = os.environ.get("WB_KEEPALIVE_LEAD_HOURS")
+    if raw is None or not str(raw).strip():
+        return KEEPALIVE_LEAD_DEFAULT_HOURS * 3600
+    try:
+        hours = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return KEEPALIVE_LEAD_DEFAULT_HOURS * 3600
+    if not (KEEPALIVE_LEAD_MIN_HOURS <= hours <= KEEPALIVE_LEAD_MAX_HOURS):
+        return KEEPALIVE_LEAD_DEFAULT_HOURS * 3600
+    return hours * 3600
+
+
+def keepalive_due(expires_at, now=None, lead=None):
+    """True when the token should be refreshed; unknown expiry (<=0) counts as due."""
+    if lead is None:
+        lead = keepalive_lead_seconds()
+    if now is None:
+        now = time.time()
+    try:
+        exp = float(expires_at or 0)
+    except (TypeError, ValueError):
+        exp = 0.0
+    if exp <= 0:
+        return True
+    return (exp - now) < lead
+
 
 class Scheduler:
     def __init__(self, pool, log=None, enabled=False, state_dir=None):
@@ -198,20 +232,20 @@ class Scheduler:
         """Run one schedule check now, ignoring the enabled switch."""
         if self._run_lock.locked():
             return {"ok": False, "msg": "已有巡检正在执行，请稍候再试"}
-        threading.Thread(target=self._execute_cycle, args=("手动立即触发",),
+        threading.Thread(target=self._execute_cycle, args=("手动立即触发", None, True),
                          daemon=True).start()
         return {"ok": True, "msg": "已触发后台调度执行"}
 
-    def _execute_cycle(self, trigger_reason="周期巡检", fired_hour=None):
+    def _execute_cycle(self, trigger_reason="周期巡检", fired_hour=None, force=False):
         if not self._run_lock.acquire(blocking=False):
             self.log("跳过本次巡检 (%s)：上一轮仍在执行" % trigger_reason)
             return
         try:
-            self._run_cycle(trigger_reason, fired_hour)
+            self._run_cycle(trigger_reason, fired_hour, force)
         finally:
             self._run_lock.release()
 
-    def _run_cycle(self, trigger_reason="周期巡检", fired_hour=None):
+    def _run_cycle(self, trigger_reason="周期巡检", fired_hour=None, force=False):
         self.last_run_time = time.strftime("%Y-%m-%d %H:%M:%S")
         self.log("开始执行任务 (%s)..." % trigger_reason)
         if not self.pool or not self.pool.accounts:
@@ -222,13 +256,24 @@ class Scheduler:
         checkin_count = 0
         travel_count = 0
         daily_chat_count = 0
+        # A configured hour runs that task only; manual triggers force all.
+        cycle_hour = fired_hour if fired_hour is not None else time.localtime().tm_hour
+        run_checkin = force or cycle_hour in self.checkin_hours
+        run_travel = force or cycle_hour in self.travel_hours
+        run_keepalive = force or cycle_hour in self.keepalive_hours
+        run_cat = force or cycle_hour in self.cat_hours
 
         for acc in list(self.pool.accounts):
             uid8 = acc.uid[:8] if acc.uid else "?"
-            # 1. Refresh the token when under 2h of life remains.
+            # 1. Refresh the token once it is inside the keepalive lead window.
             exp = acc.expires_at or 0
-            if exp and (exp - time.time()) < 7200:
-                self.log("账号 [%s] Token 即将到期，执行主动保活刷新..." % uid8)
+            if run_keepalive and keepalive_due(exp):
+                if exp:
+                    left = int(exp - time.time())
+                    detail = ("remaining %ds" % left) if left > 0 else ("expired %ds ago" % -left)
+                else:
+                    detail = "expiry unknown"
+                self.log("账号 [%s] Token %s，执行主动保活刷新..." % (uid8, detail))
                 if acc.refresh():
                     refreshed_count += 1
                     self.log("✓ 账号 [%s] Token 自动保活刷新成功" % uid8)
@@ -237,7 +282,7 @@ class Scheduler:
 
             # 2. CN realm: daily check-in and cat travel.
             if acc.realm == "cn":
-                if acc.can_checkin():
+                if run_checkin and acc.can_checkin():
                     self.log("检测到国内版账号 [%s] 今日尚未签到，执行自动签到..." % uid8)
                     res = acc.checkin()
                     if res.get("ok"):
@@ -248,20 +293,17 @@ class Scheduler:
                                  % (uid8, res.get("error") or res.get("msg")))
                     wb_tasks._pause(1.0)
 
-                travel = do_cat_travel(acc)
-                if travel.get("action") in ("claim", "depart"):
-                    travel_count += 1
-                    self.log("账号 [%s] 猫猫日常处理: %s" % (uid8, travel.get("msg")))
-                # Night-owl task: only in the cat_hours round. Offsets move
-                # minutes, not hours, so matching on the hour is reliable.
-                hour_now = time.localtime().tm_hour
-                if (fired_hour in self.cat_hours if fired_hour is not None
-                        else hour_now in self.cat_hours):
+                if run_travel:
+                    travel = do_cat_travel(acc)
+                    if travel.get("action") in ("claim", "depart"):
+                        travel_count += 1
+                        self.log("账号 [%s] 猫猫日常处理: %s" % (uid8, travel.get("msg")))
+                if run_cat:
                     night = wb_tasks.run_night_growth(acc)
                     for line in night.get("logs", []):
                         self.log("夜猫: %s" % line)
             # 3. Intl realm: daily activity chat (30/50 credit bonus).
-            if acc.realm == "intl":
+            if acc.realm == "intl" and run_checkin:
                 if acc.can_daily_chat():
                     self.log("检测到国际版账号 [%s] 今日尚未活跃，执行每日活跃打卡对话..." % uid8)
                     res = acc.daily_chat()

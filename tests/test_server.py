@@ -215,13 +215,18 @@ class TestChatRoutes(ServerCase):
         # role frame + "he" + "llo" + finish frame, then [DONE]
         self.assertEqual(frames[-1], "data: [DONE]")
         contents = []
-        for ln in frames[:-1]:
+        for ln in frames[:-2]:
             obj = json.loads(ln[len("data: "):])
             delta = obj["choices"][0].get("delta") or {}
             if delta.get("content"):
                 contents.append(delta["content"])
             self.assertNotIn("function_call", json.dumps(obj))
         self.assertEqual("".join(contents), "hello")
+        # include_usage contract: usage rides a trailing choices-less frame.
+        tail = json.loads(frames[-2][len("data: "):])
+        self.assertEqual(tail["choices"], [])
+        self.assertEqual(tail["usage"]["total_tokens"], 7)
+        self.assertNotIn("usage", json.loads(frames[-3][len("data: "):]))
 
     def test_bad_json_400(self):
         status, raw = self._request("/v1/chat/completions", body=b"{nope")

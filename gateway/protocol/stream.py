@@ -1,7 +1,9 @@
 """SSE frame cleanup and stream aggregation for chat completions."""
 
 
+import http.client
 import json
+import threading
 import time
 import uuid
 from gateway.common.ids import new_id as _new_id
@@ -118,6 +120,105 @@ def clean_responses_frame(frame):
         out.append(line)
     return ("\n".join(out) + "\n\n").encode("utf-8") if changed else frame
 
+
+
+SSE_HEARTBEAT_SECONDS = 15.0
+
+
+class SSEHeartbeat:
+    """Write SSE comments while the request thread is blocked on the upstream.
+    Shares the request's write lock so a comment can never split a frame."""
+
+    def __init__(self, write, interval=SSE_HEARTBEAT_SECONDS):
+        self._write = write
+        self._interval = max(0.05, float(interval))
+        self._lock = threading.RLock()
+        self._last_write_at = time.monotonic()
+        self._stop = threading.Event()
+        self._closed = False
+        self._thread = threading.Thread(
+            target=self._run, name="wb-sse-heartbeat", daemon=True)
+        self._thread.start()
+
+    def write(self, data):
+        if not data:
+            return
+        with self._lock:
+            if self._closed:
+                return
+            self._write(data)
+            self._last_write_at = time.monotonic()
+
+    def _run(self):
+        tick = min(0.1, self._interval / 4.0)
+        while not self._stop.wait(tick):
+            with self._lock:
+                if self._closed:
+                    return
+                if time.monotonic() - self._last_write_at < self._interval:
+                    continue
+                try:
+                    self._write(b": keepalive\n\n")
+                    self._last_write_at = time.monotonic()
+                except Exception:
+                    self._closed = True
+                    return
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+        self._stop.set()
+        self._thread.join(timeout=max(0.1, self._interval))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+
+def iter_sse_lines(source, block_size=8192):
+    """Yield lines from an HTTP response; raise IncompleteRead on a truncated EOF."""
+    read1 = getattr(source, "read1", None)
+    if read1 is None:
+        for line in source:
+            yield line
+        return
+    buf = b""
+    while True:
+        chunk = read1(block_size)
+        if not chunk:
+            # read1() returns b"" when the peer closes early, even with a
+            # Content-Length still outstanding, so a cut stream looks clean.
+            remaining = getattr(source, "length", 0) or 0
+            if remaining > 0:
+                raise http.client.IncompleteRead(b"", remaining)
+            break
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            yield line + b"\n"
+    if buf:
+        yield buf
+
+
+def chat_usage_chunk(model, usage, chunk_id=None):
+    """Trailing include_usage frame: empty choices, usage only."""
+    normalize_usage_cache_aliases(usage)
+    return json.dumps({
+        "id": chunk_id or new_chunk_id(),
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [],
+        "usage": usage,
+    }, ensure_ascii=False)
+
+
+def new_chunk_id():
+    """A unique chatcmpl id, so two replies never share one."""
+    return "chatcmpl-wb-" + uuid.uuid4().hex[:16]
 
 
 def aggregate_stream(raw_iter, model, resp_id):
@@ -242,7 +343,7 @@ def aggregate_stream(raw_iter, model, resp_id):
                 "prompt_tokens_details": {"cached_tokens": 0},
             }
     out = {
-        "id": resp_id or "chatcmpl-wb",
+        "id": resp_id or new_chunk_id(),
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,

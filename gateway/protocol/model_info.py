@@ -7,7 +7,7 @@ from gateway.protocol import state  # noqa: F401
 
 
 INTL_EXCLUSIVE_PREFIXES = ("gpt-", "gemini-")
-CN_EXCLUSIVE_PREFIXES = ("minimax-", "deepseek-v4-pro")
+CN_EXCLUSIVE_PREFIXES = ("deepseek-v4-pro",)
 INTL_EXCLUSIVE = {
     "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
     "gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gemini-3.5-flash",
@@ -57,7 +57,8 @@ def detect_model_realm(model_id):
         "kimi-k3-1", "kimi-k2.7", "kimi-k2-thinking",
         "hy3-x", "hy4-preview-dev", "hy4-preview-x"
     }
-    if m in cn_only or any(m.startswith(p) for p in ("minimax-", "deepseek-v4-pro")):
+    # minimax- is not a CN-exclusive prefix: intl serves minimax-m3.1-flash.
+    if m in cn_only or m.startswith("deepseek-v4-pro"):
         return "cn"
     return state.CURRENT_REALM
 

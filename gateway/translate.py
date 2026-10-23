@@ -56,8 +56,9 @@ from gateway.protocol.usage import (  # noqa: F401
     _best_cached_tokens, _responses_usage, normalize_usage_cache_aliases,
 )
 from gateway.protocol.stream import (  # noqa: F401
-    NOISE_KEYS, _strip_empty_fc, aggregate_stream, clean_chunk,
-    clean_responses_frame, strip_data_prefix,
+    NOISE_KEYS, SSE_HEARTBEAT_SECONDS, SSEHeartbeat, _strip_empty_fc,
+    aggregate_stream, chat_usage_chunk, clean_chunk, clean_responses_frame,
+    iter_sse_lines, new_chunk_id, strip_data_prefix,
 )
 from gateway.protocol.tools import (  # noqa: F401
     CUSTOM_TOOL_HINT, DSML_CALLS_RE, DSML_INVOKE_RE, DSML_PARAM_RE,
@@ -72,7 +73,7 @@ from gateway.protocol.request import (  # noqa: F401
     AFFINITY_BY_PREFIX, AFFINITY_DEBUG, BACKGROUND_THREAD_SOURCES,
     BACKGROUND_TRIGGER_KEYWORDS, BLOCK_BACKGROUND_REQUESTS, CJK_RE,
     background_request_message, background_request_reason,
-    banned_model_message, build_citations, build_upstream_body,
+    apply_model_aliases, banned_model_message, build_citations, build_upstream_body,
     derive_affinity_key, estimate_tokens, inject_prompt_cache_key,
     is_compaction_request, local_web_tools_enabled, normalize_stop,
     normalize_tool_choice, normalize_tools, prompt_cache_key_enabled,
@@ -80,9 +81,10 @@ from gateway.protocol.request import (  # noqa: F401
     translate_max_completion_tokens, turn_metadata_fields, web_tools_active,
 )
 from gateway.protocol.responses_in import (  # noqa: F401
-    _flatten_content, _new_id, _responses_input_to_messages, responses_to_chat,
+    _flatten_content, _new_id, _responses_input_to_messages,
+    encode_compaction_summary, has_compaction_trigger, responses_to_chat,
 )
 from gateway.protocol.responses_out import (  # noqa: F401
     chat_to_response, follow_up_with_tool_results, internal_calls_from_chat,
-    stream_responses_events, tool_name_of,
+    reasoning_only_response, stream_responses_events, tool_name_of,
 )

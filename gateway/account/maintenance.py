@@ -18,10 +18,42 @@ from gateway.account.web_config import (DAILY_CHAT_MODEL, DAILY_CHAT_WEB_PROMPT,
                                          WEB_TURN_TIMEOUT, WEB_USER_AGENT)
 from gateway.common.log import log
 
+# Upstream allows 10 active (status=working) conversations per account; a session
+# that is never stopped leaks a slot until creation fails with 429 / code 10105.
+WEB_CONVERSATION_ACTIVE_LIMIT = 10
+WEB_CONVERSATION_PRUNE_KEEP = 8
+WEB_CONVERSATION_ACTIVE_STATUSES = ("working", "creating", "pending")
+
+
+def _active_conversation_limit(status, detail):
+    """True when a rejection means the account has no free active-conversation slot."""
+    if status != 429:
+        return False
+    text = str(detail or "")
+    return ("10105" in text
+            or "maximum number of active conversations" in text.lower())
+
+
+CHECKIN_PENDING_HINTS = ("处理中", "请勿重复操作", "系统繁忙", "稍后再试")
+CHECKIN_ALREADY_HINTS = ("已签到",)
+CHECKIN_FAILURE_HINTS = ("失败",)
+
+
+def checkin_state(code, msg):
+    """Classify a check-in receipt: checked / already / pending / failed."""
+    text = str(msg or "")
+    if any(k in text for k in CHECKIN_PENDING_HINTS):
+        return "pending"
+    if code == 0:
+        # "不足" also appears in success text, so only "失败" is a hard failure.
+        return "failed" if any(k in text for k in CHECKIN_FAILURE_HINTS) else "checked"
+    if code == 10001:
+        return "already" if any(k in text for k in CHECKIN_ALREADY_HINTS) else "failed"
+    return "failed"
+
 
 class MaintenanceMixin(object):
     """Mixed into Account; relies on headers()/save()/chat_base_url()/fetch_credits()."""
-
     def is_enterprise(self):
         """Enterprise accounts have no personal growth/checkin system."""
         return bool(self.enterprise_id or self.jwt_enterprise_id())
@@ -56,11 +88,14 @@ class MaintenanceMixin(object):
                                 proxy=self.proxy)
             code = payload.get("code", -1)
             msg = payload.get("msg") or "ok"
-            self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
-            if self.path and os.path.exists(os.path.dirname(self.path)):
-                self.save(os.path.dirname(self.path))
-            return {"ok": (code == 0 or code == 10001), "code": code, "msg": msg,
-                    "data": payload.get("data")}
+            state = checkin_state(code, msg)
+            if state in ("checked", "already"):
+                self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
+                if self.path and os.path.exists(os.path.dirname(self.path)):
+                    self.save(os.path.dirname(self.path))
+                return {"ok": True, "state": state, "code": code, "msg": msg,
+                        "data": payload.get("data")}
+            return {"ok": False, "state": state, "code": code, "msg": msg, "error": msg}
         except urllib.error.HTTPError as exc:
             try:
                 body = json.loads(exc.read().decode("utf-8") or "{}")
@@ -69,12 +104,14 @@ class MaintenanceMixin(object):
             code = body.get("code")
             msg = body.get("msg") or ("HTTP %d" % exc.code)
             # upstream answers "already checked in today" as HTTP 400/10001
-            if code == 10001 or "已签到" in msg:
+            state = checkin_state(code, msg)
+            if state == "already":
                 self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
                 if self.path and os.path.exists(os.path.dirname(self.path)):
                     self.save(os.path.dirname(self.path))
-                return {"ok": True, "code": code, "msg": msg, "data": body.get("data")}
-            return {"ok": False, "error": msg}
+                return {"ok": True, "state": state, "code": code, "msg": msg,
+                        "data": body.get("data")}
+            return {"ok": False, "state": state, "code": code, "msg": msg, "error": msg}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -113,53 +150,56 @@ class MaintenanceMixin(object):
             "conversationOrigin": "workbuddy-app",
             "plugins": [{"name": "weixinpay", "marketplace": "codebuddy-builtin"}],
         }
-        req = urllib.request.Request(
-            WEB_CONVERSATIONS_URL,
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers=self.web_headers(), method="POST")
+        conversation, failure = self._web_conversation_create(body)
+        if failure and failure.get("limit"):
+            # Slots were leaked by older runs: stop the oldest gateway sessions
+            # and create once more; if nothing frees up, stop retrying.
+            freed = self.web_conversation_prune()
+            if freed:
+                conversation, failure = self._web_conversation_create(body)
+            if failure:
+                hint = ("已自动结束 %d 条旧会话" % freed) if freed else "没有可自动结束的旧会话"
+                return {"ok": False,
+                        "error": "活跃会话已达上限（%d）：%s；请到 %s 网页端结束或删除旧对话后重试"
+                                 % (WEB_CONVERSATION_ACTIVE_LIMIT, hint,
+                                    WEB_ORIGIN.replace("https://", "")),
+                        "retryable": False}
+        if failure:
+            return {"ok": False, "error": failure.get("message") or "建会话失败",
+                    "retryable": bool(failure.get("retryable"))}
+
+        keep = False
         try:
-            with _transport.urlopen(req, timeout=30, proxy=self.proxy) as resp:
-                payload = json.loads(resp.read().decode("utf-8", "replace") or "{}")
-        except urllib.error.HTTPError as exc:
+            # Creating only queues; attach the sandbox and request the turn to run it.
             try:
-                detail = exc.read().decode("utf-8", "replace")
-            except Exception:
-                detail = str(exc)
-            return {"ok": False, "error": "HTTP %d: %s" % (exc.code, detail[:120])}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
-        if not isinstance(payload, dict):
-            return {"ok": False, "error": "unexpected response"}
-        conversation = (payload.get("data") or {}).get("id")
-        if payload.get("code") not in (0, None) or not conversation:
-            return {"ok": False, "error": "code=%s msg=%s"
-                    % (payload.get("code"), payload.get("msg"))}
+                session = (self._web_conversation_get(conversation, "/session") or {}).get("data") or {}
+            except Exception as exc:
+                return {"ok": False, "conversation": conversation,
+                        "error": "session 查询失败: %s" % exc}
+            link = session.get("link") or session.get("endpoint") or ""
+            token = session.get("token") or ""
+            session_id = session.get("sessionId") or session.get("session_id") or conversation
+            cwd = session.get("cwd") or "/workspace"
+            if not link or not token:
+                return {"ok": False, "conversation": conversation,
+                        "error": "沙箱未就绪（没有 link/token）"}
 
-        # Creating only queues; attach the sandbox and request the turn to run it.
-        try:
-            session = (self._web_conversation_get(conversation, "/session") or {}).get("data") or {}
-        except Exception as exc:
-            return {"ok": False, "conversation": conversation,
-                    "error": "session 查询失败: %s" % exc}
-        link = session.get("link") or session.get("endpoint") or ""
-        token = session.get("token") or ""
-        session_id = session.get("sessionId") or session.get("session_id") or conversation
-        cwd = session.get("cwd") or "/workspace"
-        if not link or not token:
-            return {"ok": False, "conversation": conversation,
-                    "error": "沙箱未就绪（没有 link/token）"}
-
-        result = wb_webagent.run_turn(
-            link, token, session_id, cwd, prompt or DAILY_CHAT_WEB_PROMPT,
-            WEB_USER_AGENT,
-            poll_status=lambda: self._web_conversation_status(conversation),
-            wait_seconds=WEB_TURN_TIMEOUT, proxy=self.proxy,
-            model=DAILY_CHAT_MODEL)
-        result["conversation"] = conversation
-        if result.get("ok"):
-            result["msg"] = "网页通道会话跑完：%d 段输出，%d ms" % (
-                result.get("chunks") or 0, result.get("elapsed_ms") or 0)
-        return result
+            result = wb_webagent.run_turn(
+                link, token, session_id, cwd, prompt or DAILY_CHAT_WEB_PROMPT,
+                WEB_USER_AGENT,
+                poll_status=lambda: self._web_conversation_status(conversation),
+                wait_seconds=WEB_TURN_TIMEOUT, proxy=self.proxy,
+                model=DAILY_CHAT_MODEL)
+            result["conversation"] = conversation
+            if result.get("ok"):
+                keep = True
+                result["msg"] = "网页通道会话跑完：%d 段输出，%d ms" % (
+                    result.get("chunks") or 0, result.get("elapsed_ms") or 0)
+            return result
+        finally:
+            # Always release: a live session holds an active slot upstream.
+            # Successful runs are stopped (kept in history), failures deleted.
+            self.web_conversation_release(conversation, delete=not keep)
 
 
     def _web_conversation_get(self, conversation, suffix=""):
@@ -178,6 +218,97 @@ class MaintenanceMixin(object):
             return ""
         data = payload.get("data") if isinstance(payload, dict) else None
         return str((data or {}).get("status") or "")
+
+
+    def _web_conversation_call(self, conversation, action):
+        """Run stop/delete on one session; cleanup never raises into the caller."""
+        if not conversation:
+            return False
+        url = (WEB_CONVERSATIONS_URL + urllib.parse.quote(str(conversation))
+               + "/" + action)
+        req = urllib.request.Request(url, data=b"{}",
+                                     headers=self.web_headers(), method="POST")
+        try:
+            with _transport.urlopen(req, timeout=20, proxy=self.proxy) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+        except Exception:
+            return False
+        return isinstance(payload, dict) and payload.get("code") in (0, None)
+
+
+    def web_conversation_release(self, conversation, delete=False):
+        """Stop a session to free its active slot; delete too when the run failed."""
+        if not conversation:
+            return False
+        stopped = self._web_conversation_call(conversation, "stop")
+        if delete:
+            return self._web_conversation_call(conversation, "delete") or stopped
+        return stopped
+
+
+    def web_conversation_list(self, page_size=50):
+        """List this account's web sessions (upstream returns newest first)."""
+        url = WEB_CONVERSATIONS_URL + "?page=1&pageSize=%d" % max(1, int(page_size))
+        req = urllib.request.Request(url, headers=self.web_headers(), method="GET")
+        with _transport.urlopen(req, timeout=20, proxy=self.proxy) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+        data = (payload if isinstance(payload, dict) else {}).get("data") or {}
+        conversations = data.get("conversations")
+        return conversations if isinstance(conversations, list) else []
+
+
+    def web_conversation_prune(self, keep=WEB_CONVERSATION_PRUNE_KEEP):
+        """Stop the oldest gateway-created active sessions; returns how many.
+        Only sessions named after the daily-activity prompt are touched."""
+        try:
+            conversations = self.web_conversation_list()
+        except Exception:
+            return 0
+        active = [c for c in conversations
+                  if str((c or {}).get("status") or "").lower()
+                  in WEB_CONVERSATION_ACTIVE_STATUSES]
+        if len(active) < WEB_CONVERSATION_ACTIVE_LIMIT:
+            return 0
+        active.sort(key=lambda c: str((c or {}).get("createdAt") or ""))
+        stopped = 0
+        for conversation in active:
+            if len(active) - stopped <= keep:
+                break
+            if str((conversation or {}).get("name") or "").strip() != DAILY_CHAT_WEB_PROMPT:
+                continue
+            if self._web_conversation_call(conversation.get("id"), "stop"):
+                stopped += 1
+        return stopped
+
+
+    def _web_conversation_create(self, body):
+        """Create one web session; returns (conversation id, failure dict or None)."""
+        req = urllib.request.Request(
+            WEB_CONVERSATIONS_URL,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers=self.web_headers(), method="POST")
+        try:
+            with _transport.urlopen(req, timeout=30, proxy=self.proxy) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", "replace")
+            except Exception:
+                detail = str(exc)
+            return None, {"message": "HTTP %d: %s" % (exc.code, detail[:120]),
+                          "retryable": exc.code >= 500 or exc.code in (408, 429),
+                          "limit": _active_conversation_limit(exc.code, detail)}
+        except Exception as exc:
+            return None, {"message": str(exc), "retryable": True, "limit": False}
+        if not isinstance(payload, dict):
+            return None, {"message": "unexpected response", "retryable": True,
+                          "limit": False}
+        conversation = (payload.get("data") or {}).get("id")
+        if payload.get("code") not in (0, None) or not conversation:
+            return None, {"message": "code=%s msg=%s" % (payload.get("code"),
+                                                         payload.get("msg")),
+                          "retryable": False, "limit": False}
+        return conversation, None
 
 
     def daily_chat(self, web=None):

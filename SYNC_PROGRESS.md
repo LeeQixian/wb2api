@@ -5,9 +5,9 @@
 
 | 项 | 值 |
 |---|---|
-| 同步到 | `75fa346` release: v1.7.16 |
+| 同步到 | `477ba36` release: v1.7.32 |
 | 分叉点 | `650b659` release: v1.5.4（首次瘦身移植的基线） |
-| 已跟进区间 | v1.5.5 → v1.7.16 |
+| 已跟进区间 | v1.5.5 → v1.7.32 |
 
 同步口径：只跟进已发布的 tag，tag 之后的主干不读。上游 bug 修复照搬；上游新增
 功能加开关且默认关；与「本地独有改动」冲突的一律以本地为准。
@@ -47,6 +47,8 @@
 - realm 状态文件路径按 `--accounts-dir` 动态解析。
 - accounts 热重载保留活对象（防 refresh 竞争覆盖 token）。
 - translate / upstream 无全局状态，POOL、log、目录全部参数化。
+- 调度开关（settings.json，默认关）：`account_max_concurrent`、`affinity_stable_key_enabled`。
+- 模型别名 `model_aliases`：对象或列表两种写法，在协议转换与选号之前解析。
 
 ## 重点关心（跟上游盯这些）
 

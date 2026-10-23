@@ -23,6 +23,7 @@ AFFINITY_DEBUG = os.environ.get("WB_AFFINITY_DEBUG", "0").lower() in (
 BLOCK_BACKGROUND_REQUESTS = False
 BACKGROUND_TRIGGER_KEYWORDS = (
     "memory_consolidation",
+    "memory",
     "memory-write",
     "memory_write",
     "memorywriting",
@@ -51,6 +52,32 @@ CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
 
 def set_system_prompt(text):
     state.set_system_prompt(str(text or state.DEFAULT_SYSTEM_PROMPT))
+
+
+def apply_model_aliases(payload, aliases):
+    """Rewrite the client's model name from the operator's alias table.
+    Must run before protocol translation so every entry point resolves alike."""
+    if not isinstance(payload, dict) or not isinstance(aliases, dict):
+        return
+    name = payload.get("model")
+    if not isinstance(name, str):
+        return
+    target = aliases.get(name.strip().lower())
+    if not target or target == name:
+        return
+    payload["model"] = target
+    log("alias: model %s -> %s" % (name, target))
+
+
+def default_reasoning_effort_mode():
+    """How to fill reasoning_effort when the client left it out.
+    high = catalog default else "high" (legacy); catalog = catalog only; off = never."""
+    raw = os.environ.get("WB_DEFAULT_REASONING_EFFORT", "").strip().lower()
+    if raw in ("off", "none", "0", "false", "no"):
+        return "off"
+    if raw in ("catalog", "model", "default"):
+        return "catalog"
+    return "high"
 
 
 def build_upstream_body(payload):
@@ -120,7 +147,13 @@ def build_upstream_body(payload):
             if "thinking" not in body:
                 body["thinking"] = {"type": "enabled"}
             if not effort:
-                body["reasoning_effort"] = model_default_effort(model) or "high"
+                mode = default_reasoning_effort_mode()
+                if mode != "off":
+                    chosen = model_default_effort(model)
+                    if not chosen and mode == "high":
+                        chosen = "high"
+                    if chosen:
+                        body["reasoning_effort"] = chosen
     body["stream"] = True
     if "stream_options" not in body:
         body["stream_options"] = {"include_usage": True}
@@ -532,6 +565,13 @@ def derive_affinity_key(messages):
         if not msgs:
             return None
         head = msgs[:2]
+        # Opt-in: cover the first assistant reply too, so two conversations with
+        # the same opening line stop swapping accounts every turn.
+        try:
+            if len(msgs) > 2 and wb_settings.affinity_stable_key_enabled(state.ACCOUNTS_DIR):
+                head = msgs[:3]
+        except Exception:
+            pass
         blob = json.dumps(head, ensure_ascii=False, sort_keys=True).encode("utf-8")
         return "pfx-" + hashlib.sha256(blob).hexdigest()[:16]
     except Exception:

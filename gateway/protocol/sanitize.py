@@ -39,6 +39,32 @@ SANITIZE_KV_RE = re.compile(r"(?i)\bcc_[a-z0-9_]+=[^;\r\n]*;?\s*")
 SANITIZE_OMO_JUNIOR_RE = re.compile(
     r"Sisyphus-Junior - Focused executor from OhMyOpenCode", re.IGNORECASE
 )
+# Upstream reads "client self-introduction + brand" as an unofficial client
+# (400/11-128). Rewrite the whole sentence; system/developer/assistant only.
+SANITIZE_IDENTITY_VERBS = (
+    "powered by", "built on", "built by", "created by",
+    "developed by", "made by", "trained by",
+)
+SANITIZE_IDENTITY_RE = re.compile(
+    r"You are\s+"
+    r"(?:an?\s+|the\s+)?(?:[\w.-]+\s+){0,3}?"
+    r"(?:agent|assistant|model|AI|LLM)?[\s,]*"
+    r"(?:powered by|built on|built by|created by|developed by|made by|trained by)"
+    r"[^\n]*?(?:\.(?=\s|$)|(?=\n|$))",
+    re.IGNORECASE)
+SANITIZE_IDENTITY_REPLACEMENT = "You are a helpful AI assistant."
+# The GUI paragraph is the fingerprint as a whole: only reorder the tail of the
+# first sentence, keeping every word (incl. the full product name).
+SANITIZE_DSH_GUI_RE = re.compile(
+    r"(?i)(You are interacting with the user through the "
+    r"DeepSeek[ \t]+Harness[ \t]+Web[ \t]+GUI)"
+    r" whose URL the runtime context names\.")
+SANITIZE_DSH_GUI_REPLACEMENT = r"\1 whose URL is named in the runtime context."
+SANITIZE_DSH_GUI_LOWER = "whose url the runtime context names"
+# Brand shortening: prose spacing only, so paths and identifiers stay intact.
+SANITIZE_BRAND_RE = re.compile(r"DeepSeek[ \t]+Harness", re.IGNORECASE)
+SANITIZE_BRAND_REPLACEMENT = "DeepSeek"
+SANITIZE_BRAND_LOWER = "harness"
 SANITIZE_REI_FOLD = str.maketrans({0x130: "i", 0x131: "i", 0x17F: "s"})
 SANITIZE_BARE_HDR_LOWER = SANITIZE_BARE_HDR_RE.pattern
 if SANITIZE_BARE_HDR_LOWER.startswith("(?i)"):
@@ -46,7 +72,7 @@ if SANITIZE_BARE_HDR_LOWER.startswith("(?i)"):
 SANITIZE_OMO_JUNIOR_LOWER = SANITIZE_OMO_JUNIOR_RE.pattern.lower()
 
 
-def has_fingerprint(text):
+def has_fingerprint(text, identity=True):
     if not isinstance(text, str) or not text:
         return False
     for f in SANITIZE_FEATURES:
@@ -56,17 +82,35 @@ def has_fingerprint(text):
         low = text.translate(SANITIZE_REI_FOLD).lower()
     else:
         low = text.lower()
-    return SANITIZE_BARE_HDR_LOWER in low or SANITIZE_OMO_JUNIOR_LOWER in low
+    if (SANITIZE_BARE_HDR_LOWER in low
+            or SANITIZE_OMO_JUNIOR_LOWER in low):
+        return True
+    if not identity:
+        return False
+    if SANITIZE_BRAND_LOWER in low and SANITIZE_BRAND_RE.search(text) is not None:
+        return True
+    if (SANITIZE_DSH_GUI_LOWER in low
+            and SANITIZE_DSH_GUI_RE.search(text) is not None):
+        return True
+    # The verb phrase is only a cheap prefilter; the regex decides.
+    if not any(needle in low for needle in SANITIZE_IDENTITY_VERBS):
+        return False
+    return SANITIZE_IDENTITY_RE.search(text) is not None
 
 
-def sanitize_text(text):
+def sanitize_text(text, identity=True):
     if not isinstance(text, str) or not text:
         return text
-    if not has_fingerprint(text):
+    if not has_fingerprint(text, identity=identity):
         return text
     # Deliberately narrow: either token alone is accepted upstream, so only
     # the confirmed contiguous fingerprint is neutralized.
     text = SANITIZE_OMO_JUNIOR_RE.sub("Sisyphus-Junior - Focused executor", text)
+    if identity:
+        text = SANITIZE_IDENTITY_RE.sub(SANITIZE_IDENTITY_REPLACEMENT, text)
+        text = SANITIZE_DSH_GUI_RE.sub(SANITIZE_DSH_GUI_REPLACEMENT, text)
+        # Brand shortening runs last: the GUI rule still needs the full name.
+        text = SANITIZE_BRAND_RE.sub(SANITIZE_BRAND_REPLACEMENT, text)
     for old, new in SANITIZE_REWRITES:
         text = text.replace(old, new)
     text = SANITIZE_HDR_RE.sub("", text)
@@ -79,15 +123,15 @@ def sanitize_text(text):
     return text.strip()
 
 
-def sanitize_content(content):
+def sanitize_content(content, identity=True):
     if isinstance(content, str):
-        return sanitize_text(content)
+        return sanitize_text(content, identity=identity)
     if isinstance(content, list):
         out = []
         for part in content:
             if isinstance(part, dict) and part.get("type") == "text" and "text" in part:
                 p = dict(part)
-                p["text"] = sanitize_text(p["text"])
+                p["text"] = sanitize_text(p["text"], identity=identity)
                 out.append(p)
             else:
                 out.append(part)
@@ -110,7 +154,7 @@ def sanitize_tool_calls(tool_calls):
                 fn = dict(fn)
                 raw_args = fn.get("arguments")
                 if isinstance(raw_args, str):
-                    fn["arguments"] = sanitize_text(raw_args)
+                    fn["arguments"] = sanitize_text(raw_args, identity=False)
                 elif raw_args is None:
                     fn["arguments"] = "{}"
                 else:
@@ -134,10 +178,14 @@ def sanitize_messages(messages):
             item = dict(m)
             keep_result = (preserve_request_contract_enabled()
                            and item.get("role") in ("tool", "function"))
+            # Identity rules never touch user/tool data (#537); assistant
+            # history is included because the same sentence 400s there (#574).
+            identity = item.get("role") in ("system", "developer", "assistant")
             if "content" in item and not keep_result:
-                item["content"] = sanitize_content(item["content"])
+                item["content"] = sanitize_content(item["content"], identity=identity)
             if isinstance(item.get("reasoning_content"), str):
-                item["reasoning_content"] = sanitize_text(item["reasoning_content"])
+                item["reasoning_content"] = sanitize_text(item["reasoning_content"],
+                                                          identity=False)
             if "tool_calls" in item:
                 item["tool_calls"] = sanitize_tool_calls(item["tool_calls"])
             out.append(item)

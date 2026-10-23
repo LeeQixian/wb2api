@@ -101,6 +101,20 @@ def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, name
     return obj
 
 
+def reasoning_only_response(result):
+    """True when a Responses object has reasoning but no text or tool call."""
+    obj = result or {}
+    output = obj.get("output") or []
+    text = obj.get("output_text") or ""
+    has_calls = any(
+        isinstance(o, dict) and o.get("type") in ("function_call", "web_search_call")
+        for o in output)
+    has_reasoning = any(
+        isinstance(o, dict) and o.get("type") == "reasoning" for o in output)
+    return (not text.strip() and has_reasoning and not has_calls
+            and obj.get("status") != "incomplete")
+
+
 def stream_responses_events(upstream, model, holder):
     """Yield Responses-API SSE frames translated from chat-completions chunks."""
     resp_id, msg_id, rs_id = _new_id("resp_"), _new_id("msg_"), _new_id("rs_")
@@ -376,12 +390,29 @@ def stream_responses_events(upstream, model, holder):
                     "prompt_tokens_details": {"cached_tokens": 0},
                 }
                 holder["usage"] = usage
+        # DeepSeek sometimes spends the whole round on reasoning and returns no
+        # text; a completed response would hide that, so fail it (issue #508).
+        empty_reasoning_only = (
+            not full_text.strip()
+            and bool("".join(reason_parts).strip())
+            and not tool_calls_map and not dsml_calls
+            and not _internal_calls
+            and finish != "length" and not dropped_truncated)
         status = ("completed" if (finish != "length" and not dropped_truncated)
                   else "incomplete")
+        if empty_reasoning_only:
+            status = "failed"
+            holder["empty_reasoning"] = True
         final = resp_obj(status)
         if finish == "length":
             final["incomplete_details"] = {"reason": "max_output_tokens"}
-        if not holder.get("suppress_completion"):
+        if empty_reasoning_only:
+            final["error"] = {
+                "code": "empty_reasoning_only",
+                "message": "upstream returned reasoning without output text; retry",
+            }
+            yield ev("response.failed", {"response": final})
+        elif not holder.get("suppress_completion"):
             yield ev("response.completed", {"response": final})
 
         # Open only on the first round; a later response.created would show

@@ -96,9 +96,16 @@ key 仅当 `settings.json` 配了 `api_key` 才强制；没配就全放行（默
 | `upstream.header/idle_timeout_seconds` | 120/300 | 上游首包超时与流空闲超时 |
 | `schedule.{checkin,travel,keepalive,cat}` | 9/21 · 9/21 · 22 · 1 | 后台排程时段，热加载免重启 |
 | `prompt.mode` / `prompt.file` | passthrough | 系统提示词模式（passthrough/custom/append） |
+| `model_aliases` | 空 | 入口名映射，对象 `{"别名":"真实模型"}` 或 `[{"from","to"}]` |
+| `account_max_concurrent` | 0=不限 | 单账号同时在飞的 chat 请求上限（1..10） |
+| `affinity_stable_key_enabled` | false | 会话粘滞键额外覆盖首条 assistant 回复 |
 
 `WB_CA_BUNDLE=/path/to/ca.pem`（优先）或 `SSL_CERT_FILE` 追加私有根证书，用于公司
 代理 / TLS 解密后面的自签链；证书校验失败不重试，直接报带指引的 502。
+`WB_KEEPALIVE_LEAD_HOURS`（默认 48）决定 token 提前多久续期，必须大于巡检间隔；
+`WB_DEFAULT_REASONING_EFFORT`（`high`/`catalog`/`off`）控制客户端未指定思考档位时的默认值；
+`WB_MODEL_SCOPED_ERRORS_PENALIZE=1` 让模型级 5xx（11102/11129/11134/11150/11158）
+重新计入账号熔断。
 `WB_PRESERVE_REQUEST_CONTRACT=1` 保留客户端数据原样（tool arguments 与 tool 结果
 不消毒、namespace 子工具的 `strict`、Responses `text.format` 映射为
 `response_format`），默认关。

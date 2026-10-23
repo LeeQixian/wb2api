@@ -322,6 +322,55 @@ def _normalize_hours(value):
     return sorted(out) if out else None
 
 
+ACCOUNT_MAX_CONCURRENT_KEY = "account_max_concurrent"
+ACCOUNT_MAX_CONCURRENT_MAX = 10
+AFFINITY_STABLE_KEY_ENABLED_KEY = "affinity_stable_key_enabled"
+
+
+def account_max_concurrent(directory):
+    """Chat requests one upstream account may run at once; 0 = unlimited."""
+    value = load(directory).get(ACCOUNT_MAX_CONCURRENT_KEY)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    if value < 0 or value > ACCOUNT_MAX_CONCURRENT_MAX:
+        return 0
+    return value
+
+
+def affinity_stable_key_enabled(directory):
+    """Whether the conversation key also covers the first assistant turn."""
+    return load(directory).get(AFFINITY_STABLE_KEY_ENABLED_KEY) is True
+
+
+MODEL_ALIASES_KEY = "model_aliases"
+
+
+def _clean_model_aliases(raw):
+    """Normalise an alias table to {lowercase alias: target}; bad shapes ignored."""
+    out = {}
+    pairs = []
+    if isinstance(raw, dict):
+        pairs = list(raw.items())
+    elif isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            source = item.get("from") or item.get("alias") or item.get("name")
+            target = item.get("to") or item.get("target") or item.get("model")
+            pairs.append((source, target))
+    for source, target in pairs:
+        alias = str(source or "").strip().lower()
+        model = str(target or "").strip()
+        if alias and model and alias != model.lower():
+            out[alias] = model
+    return out
+
+
+def model_aliases(directory):
+    """Read the operator-maintained model alias table."""
+    return _clean_model_aliases(load(directory).get(MODEL_ALIASES_KEY))
+
+
 def schedule_hours(directory):
     """Schedule hours per key; invalid or missing entries fall back per key.
     A hand-edited settings.json must never stop the scheduler."""
