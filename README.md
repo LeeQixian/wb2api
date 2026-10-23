@@ -48,6 +48,7 @@ OpenAI 兼容，路由面就这些（命令行细节看 [USAGE.md](USAGE.md)）�
 | `GET /credits` | 免 | 各账号积分/余额 |
 | `POST /v1/chat/completions` | key | Chat Completions，stream / 非 stream |
 | `POST /v1/responses` | key | Responses API（Codex / Claude Code） |
+| `POST /v1/responses/compact` | key | Codex 远程上下文压缩（也可用 `compaction_trigger` 触发） |
 
 key 仅当 `settings.json` 配了 `api_key` 才强制；没配就全放行（默认只绑
 127.0.0.1）。只认 `Authorization: Bearer` / `x-api-key` / `api-key` 头，不接受

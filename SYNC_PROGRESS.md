@@ -42,7 +42,7 @@
 - wbctl 全套 CLI（替代面板），含昵称 / uid 前缀解析。
 - `wbctl import` 三格式：JWT、桌面嵌套 `.info`、hub 扁平 JSON。
 - `wbctl growthplan` 独立命令：一次性成长任务不走调度器。
-- server 仅 7 条路由、移除 `?key=`、CORS 默认关、默认绑 127.0.0.1。
+- server 路由面固定：`/health`、`/realm`、`/v1/models`、`/credits`、`/v1/chat/completions`、`/v1/completions`、`/v1/responses`、`/v1/responses/compact`；移除 `?key=`、CORS 默认关、默认绑 127.0.0.1。
 - `cn:` / `global:` 模型名前缀 + 双出口全量 `/v1/models`。
 - realm 状态文件路径按 `--accounts-dir` 动态解析。
 - accounts 热重载保留活对象（防 refresh 竞争覆盖 token）。

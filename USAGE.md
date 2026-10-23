@@ -158,8 +158,13 @@ python3 -m gateway.wbctl set-switch                       # 名字打错会列�
 
 这几个之外的 `settings.json` 键没有 `set-switch` 名字：`upstream.header_timeout_seconds` /
 `upstream.idle_timeout_seconds`（首包与流空闲超时）、`schedule.*`、`prompt.mode` /
-`prompt.file`（后者用 `wbctl set-prompt`）。直接编辑 `accounts/settings.json`，除
-`schedule` 外都要重启网关才生效。
+`prompt.file`（后者用 `wbctl set-prompt`）、`model_aliases`（入口名映射，对象或
+`[{"from","to"}]` 两种写法）、`account_max_concurrent`（单账号在飞请求上限，0=不限）、
+`affinity_stable_key_enabled`（会话键额外覆盖首条 assistant 回复）。直接编辑
+`accounts/settings.json`，除 `schedule` 外都要重启网关才生效。
+
+`--tasks` 的 token 保活默认提前 48 小时续期（`WB_KEEPALIVE_LEAD_HOURS` 可调，必须
+大于巡检间隔）；巡检只在各任务自己的配置小时执行，`wbctl` 的手动触发会跑完整一轮。
 
 ### 密钥
 
