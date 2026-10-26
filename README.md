@@ -110,12 +110,19 @@ key 仅当 `settings.json` 配了 `api_key` 才强制；没配就全放行（默
 `WB_PRESERVE_REQUEST_CONTRACT=1` 保留客户端数据原样（tool arguments 与 tool 结果
 不消毒、namespace 子工具的 `strict`、Responses `text.format` 映射为
 `response_format`），默认关。
+`WB_DESKTOP_CHAT_COMPAT=1` 让桌面身份的 chat 请求改用 CLI/SDK 头族（去掉浏览器头、
+补 B3 parent span、带 `x-stainless-*` 但不带 `x-stainless-timeout`），默认关；
+CLI、VSCode、计费 REST 与请求体不受影响。
 
 ## 注意事项
 
 - **账号级失败治理默认生效**：429 指数退避 10min→2h；连续硬失败熔断 30min→6h；
   402 余额不足停放至次日本地 04:00，余额恢复提前解冻。连击计数受
   `WB_FAIL_WINDOW`（默认 600 秒）时间窗约束，隔久了从第一档重算。
+- **模型级 429 窗口跨重启有效**：上游给的重置时刻写进账号 JSON（`modelWindows`），
+  重启后未到期的冷却照旧生效；到点靠时钟比较自动放行，成功请求即时清除。
+- **日活网页会话有兜底**：每个会话在进程内登记（上限 128 条），正常收尾即注销；
+  收尾失败或执行线程卡死时，调度器每 60 秒代为关闭，避免 10 个活跃名额被占满。
 - **`enable` / `disable` 只管推理**：`--tasks` 的保活/签到/旅行对每个能跑通的账号
   无条件执行，与开关无关。一次性成长任务用 `wbctl growthplan <uid>` 手动跑。
 - **反风控是硬约束**：账号间 3~10 秒随机间隔，排程时刻每日 ±15~45 分钟随机偏移，
