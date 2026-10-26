@@ -1,7 +1,7 @@
 # 与上游 workbuddy2api-hub 的同步基线
 
 上游仓库：[ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)
-（本地备份 `/home/Arisha/Projects/Watch/workbuddy2api-hub/`）
+（本地备份 `~/Projects/Watch/workbuddy2api-hub/`）
 
 | 项 | 值 |
 |---|---|
