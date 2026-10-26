@@ -1,76 +1,35 @@
-"""Account model: credentials, outbound headers, cooldowns and credit state."""
+"""Account model: credential, readiness and outbound headers."""
 
-import base64
 import json
 import os
 import re
 import threading
 import time
-import urllib.error
-import urllib.request
 
 from gateway.fingerprint import derive_id, generate_request_id, session_id
 from gateway import identity
-from gateway import settings as wb_settings
-from gateway.account import jwt as _jwt
-from gateway.account import backoff as _backoff
 from gateway.account.affinity import _human_delta, _human_left
-from gateway.account.backoff import (BREAKER_THRESHOLD, DEGRADE_THRESHOLD,
-                                     FAIL_WINDOW, breaker_backoff,
-                                     degrade_backoff, next_local_4am,
-                                     soft_backoff, unverified_soft_backoff)
-from gateway.account.credentials import deduction_end_text
-from gateway.account.jwt import (EXPIRY_SENTINEL_DAYS, GET_RESOURCE_PATH,
-                                 REFRESH_PATH, detect_realm_from_token,
-                                 domain_for_realm, get_realm_config, jwt_exp,
-                                 jwt_uid, normalize_epoch)
+from gateway.account.backoff import FAIL_WINDOW
+from gateway.account.health import (HealthMixin, auth_failure_text,
+                                    restore_model_windows)
+from gateway.account.jwt import (GET_RESOURCE_PATH, REFRESH_PATH,
+                                 detect_realm_from_token, domain_for_realm,
+                                 get_realm_config, jwt_exp, jwt_uid,
+                                 normalize_epoch)
 from gateway.account.maintenance import MaintenanceMixin
+from gateway.account.packages import ExpiryMixin, parse_package_account
 from gateway.account import transport as _transport
-from gateway.common.log import log
-
-
-def _auth_failure_text(text):
-    """True for a credential-shaped 401, not an intermediate proxy page.
-    An HTML 401 from nginx/openresty must not park a healthy token (#440)."""
-    lower = str(text or "").lower()
-    if "<html" in lower:
-        return False
-    return ("401" in lower or "unauthorized" in lower or "authorization" in lower
-            or "token expired" in lower or "invalid_token" in lower)
 
 
 #: rewritten from scratch each run; never persisted.
 RUNTIME_ONLY_FIELDS = ("lastError", "cooldownUntil")
-
-
-def _restore_model_windows(raw):
-    """429 windows that have not expired yet survive a restart (hub a6bb76a).
-    Accepts {model: epoch} (what to_dict writes) and a list of rows."""
-    if isinstance(raw, dict):
-        items = raw.items()
-    elif isinstance(raw, list):
-        items = [(row.get("model"), row.get("expiresAt"))
-                 for row in raw if isinstance(row, dict)]
-    else:
-        items = []
-    now = time.time()
-    windows = {}
-    for model, until in items:
-        try:
-            deadline = float(until)
-        except (TypeError, ValueError):
-            continue
-        name = str(model or "").strip()
-        if name and deadline > now:
-            windows[name] = deadline
-    return windows
 
 #: persisted but reset on load (runtime bookkeeping).
 VOLATILE_FIELDS = ("soft_rate_streak", "breaker_fails", "degrade_fails",
                    "model_cooldowns")
 
 
-class Account(MaintenanceMixin):
+class Account(HealthMixin, ExpiryMixin, MaintenanceMixin):
     """One WorkBuddy credential with its runtime state."""
 
     def __init__(self, data, path=None):
@@ -101,17 +60,15 @@ class Account(MaintenanceMixin):
         self.source = str(data.get("source") or "oauth")
         self.proxy = str(data.get("proxy") or "").strip()
         self.enabled = data.get("enabled", True)
-        # Runtime-only, never restored from the credential file:
-        # a persisted error outlived its 429 across restarts. save() strips it.
+        # Runtime-only, never restored from the credential file: save() strips
+        # it, so a stale error cannot outlive the cooldown that produced it.
         self.last_error = ""
         # Set only by a credential-shaped failure; an HTML proxy 401 never sets it.
         self.token_expired = not token
         self.cooldown_until = 0.0
-        # Per-model cooldowns: upstream 6004 rate limits bind one model, not
-        # the account, so other models keep serving. Absolute 429 reset
-        # instants are persisted in the credential and re-armed on load;
-        # throttle_wait compares against the clock, so they lapse on their own.
-        self.model_cooldowns = _restore_model_windows(data.get("modelWindows"))
+        # Per-model cooldowns: upstream 6004 limits bind one model, not the account.
+        # Windows persist as absolute epochs and lapse on their own against the clock.
+        self.model_cooldowns = restore_model_windows(data.get("modelWindows"))
         self.credits = data.get("credits") or None
         self.last_checkin = data.get("lastCheckin") or None
         self.last_daily_chat = data.get("lastDailyChat") or None
@@ -155,9 +112,8 @@ class Account(MaintenanceMixin):
         # Guards the local estimate consume_credit() writes. Separate from
         # _credits_lock, which is held across a network call.
         self._balance_lock = threading.Lock()
-        # Live web sessions this account created: {conversation id: start}.
-        # The turn thread's finally cannot free a session when the thread
-        # itself is wedged in socket land; the scheduler sweeps this ledger.
+        # Live web sessions this account created: {conversation id: start}. A turn
+        # thread wedged in socket land cannot free one; the scheduler sweeps this.
         self._web_sessions = {}
         self._web_sessions_lock = threading.Lock()
 
@@ -362,8 +318,8 @@ class Account(MaintenanceMixin):
         remaining = exp - time.time()
         if remaining > 120:
             return True
-        # Refresh decides availability: returning True unconditionally sent
-        # stale-credential requests upstream. Read-only callers disable it.
+        # Refresh decides availability: an unrefreshed stale credential must not
+        # count as ready. Read-only callers disable the refresh.
         if not allow_refresh:
             return False
         return self.refresh()
@@ -517,7 +473,7 @@ class Account(MaintenanceMixin):
             payload = _transport.http_json(url, data=b"{}", method="POST", headers=headers, timeout=30,
                                 proxy=self.proxy)
         except Exception as exc:
-            if _auth_failure_text(exc):
+            if auth_failure_text(exc):
                 self.token_expired = True
                 self._set_last_error("refresh rejected (401); sign in again")
             else:
@@ -568,9 +524,9 @@ class Account(MaintenanceMixin):
             return {"ok": False, "error": str(exc)}
         data = res.get("data", {}).get("Response", {}).get("Data", {})
         accounts = data.get("Accounts") or []
-        # Packages go through the hub's parser to carry days_left/no_expiry;
+        # Packages go through parse_package_account to carry days_left/no_expiry;
         # the expiring-credits preference reads those fields.
-        packages = [self._parse_package_account(a) for a in accounts]
+        packages = [parse_package_account(a) for a in accounts]
         tot_remain = round(sum(p["remain"] for p in packages), 2)
         tot_used = round(sum(p["used"] for p in packages), 2)
         tot_size = round(sum(p["size"] for p in packages), 2)
@@ -601,305 +557,4 @@ class Account(MaintenanceMixin):
             self.save(os.path.dirname(self.path))
         self.revive_balance_cooldown()
         return {"ok": True, "credits": self.credits}
-
-    def soonest_expiring_days(self):
-        """Days left on the earliest still-usable package; None when unknown."""
-        credits = self.credits
-        if not isinstance(credits, dict):
-            return None
-        soonest = None
-        for package in (credits.get("packages") or []):
-            if not isinstance(package, dict):
-                continue
-            # package_code is a fallback for credit blobs written before the
-            # no_expiry flag existed.
-            if package.get("no_expiry"):
-                continue
-            if package.get("package_code") == "enterprise":
-                continue
-            if package.get("is_expired"):
-                continue
-            days = package.get("days_left")
-            remain = package.get("remain")
-            if not isinstance(days, (int, float)) or days < 0:
-                continue
-            if not isinstance(remain, (int, float)) or remain <= 0:
-                continue
-            if soonest is None or days < soonest:
-                soonest = float(days)
-        return soonest
-
-    def in_expiring_window(self):
-        """True when this account should jump the dispatch queue."""
-        try:
-            window = int(self.expiring_window_days or 0)
-        except (TypeError, ValueError):
-            window = 0
-        if window <= 0:
-            return False
-        soonest = self.soonest_expiring_days()
-        return soonest is not None and soonest <= window
-
-    def _parse_package_account(self, acc):
-        pkg_name = acc.get("PackageName") or "Package"
-        pkg_code = acc.get("PackageCode") or ""
-
-        def _val(*keys):
-            for k in keys:
-                v = acc.get(k)
-                if v is not None and v != "":
-                    try:
-                        return float(v)
-                    except (ValueError, TypeError):
-                        pass
-            return 0.0
-
-        size = _val("CycleCapacitySizePrecise", "CycleCapacitySize", "CapacitySizePrecise", "CapacitySize")
-        remain = _val("CycleCapacityRemainPrecise", "CycleCapacityRemain", "CapacityRemainPrecise", "CapacityRemain")
-        used = _val("CycleCapacityUsedPrecise", "CycleCapacityUsed", "CapacityUsedPrecise", "CapacityUsed")
-
-        if size > 0 and used <= 0 and remain <= size:
-            used = max(0.0, size - remain)
-        elif size > 0 and remain <= 0 and used < size:
-            remain = max(0.0, size - used)
-
-        # Extract the grant reason (official campaign, referral, ...).
-        grant_reason = ""
-        for attr in (acc.get("AccountAttributes") or []):
-            if isinstance(attr, dict) and attr.get("Key") == "grantReason":
-                grant_reason = str(attr.get("Value") or "")
-                break
-
-        # Extract the creation time (ms timestamp).
-        create_time = ""
-        raw_create = acc.get("CreateTime")
-        if raw_create:
-            try:
-                ts = float(raw_create)
-                if ts > 1e11:
-                    ts /= 1000.0
-                create_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
-            except Exception:
-                create_time = str(raw_create)
-
-        end_time_str = acc.get("CycleEndTime") or acc.get("ExpiredTime") or ""
-        # Follow DeductionEndTime, not CycleEndTime: for free/trial packs the
-        # latter would flag an expiry they do not have.
-        expire_time_str = deduction_end_text(acc) or end_time_str
-        days_left = None
-        is_expired = False
-        no_expiry = False
-        if expire_time_str:
-            try:
-                clean_time = expire_time_str.replace("T", " ")[:19]
-                end_ts = time.mktime(time.strptime(clean_time, "%Y-%m-%d %H:%M:%S"))
-                diff_sec = end_ts - time.time()
-                if diff_sec > EXPIRY_SENTINEL_DAYS * 86400.0:
-                    no_expiry = True
-                else:
-                    days_left = round(diff_sec / 86400.0, 1)
-                    is_expired = diff_sec < 0
-            except Exception:
-                pass
-
-        in_usage = bool(acc.get("InUsage"))
-        if not in_usage and not is_expired and remain > 0 and used > 0:
-            in_usage = True
-
-        return {
-            "name": pkg_name,
-            "package_code": pkg_code,
-            "product_name": acc.get("ProductName") or "",
-            "sub_product_name": acc.get("SubProductName") or "",
-            "grant_reason": grant_reason,
-            "resource_id": acc.get("ResourceId") or "",
-            "deal_name": acc.get("DealName") or "",
-            "create_time": create_time,
-            "remain": round(remain, 2),
-            "used": round(used, 2),
-            "size": round(size, 2),
-            "unit": acc.get("CapacityUnit") or "credits",
-            "in_usage": in_usage,
-            "auto_renew": bool(acc.get("AutoRenewFlag") or acc.get("SupportAutoRenew")),
-            "cycle_start_time": acc.get("CycleStartTime") or "",
-            "cycle_end_time": end_time_str,
-            "expire_time": expire_time_str,
-            "no_expiry": no_expiry,
-            "days_left": days_left,
-            "is_expired": is_expired,
-            "status": acc.get("Status", 0),
-        }
-
-    def note_balance_cooled(self, message="insufficient credits"):
-        """402 / out of credits: park until the next local 04:00."""
-        until = next_local_4am()
-        with self._throttle_lock:
-            self.last_error = str(message)[:200]
-            self.balance_until = max(self.balance_until, until)
-        return until
-
-    def revive_balance_cooldown(self):
-        """A refresh showing credits again lifts the 402 park, nothing else."""
-        if not self.balance_until:
-            return False
-        credits = self.credits if isinstance(self.credits, dict) else {}
-        try:
-            remain = int(credits.get("remain"))
-        except (TypeError, ValueError):
-            remain = None
-        if remain is None or remain <= 0:
-            return False
-        with self._throttle_lock:
-            self.balance_until = 0.0
-            self.last_error = ""
-            self.last_error_detail = ""
-        return True
-
-    def note_soft_rate(self, message):
-        """Account-level rate limit: soft cooldown with exponential backoff."""
-        with self._throttle_lock:
-            self._decay_soft_streak()
-            self.soft_streak += 1
-            wait = soft_backoff(self.soft_streak)
-            self.last_error = str(message)[:200]
-            self.cooldown_until = max(self.cooldown_until, time.time() + wait)
-        return wait
-
-    def note_unscoped_rate(self, model):
-        """Unscoped soft 429: grow its own streak, return this model's window."""
-        with self._throttle_lock:
-            self._decay_soft_streak()
-            self.unscoped_streak += 1
-            return unverified_soft_backoff(self.unscoped_streak)
-
-    def _decay_strikes(self):
-        """Drop strikes older than FAIL_WINDOW; caller holds _throttle_lock."""
-        now = time.time()
-        if FAIL_WINDOW and self.last_fail_at and now - self.last_fail_at > FAIL_WINDOW:
-            self.fails = 0
-            self.degrade_count = 0
-        self.last_fail_at = now
-
-    def _decay_soft_streak(self):
-        """Same window for both rate ladders; caller holds _throttle_lock.
-        A 429 a day later starts at the first rung, not at yesterday's."""
-        now = time.time()
-        if FAIL_WINDOW and self.last_soft_at and now - self.last_soft_at > FAIL_WINDOW:
-            self.soft_streak = 0
-            self.unscoped_streak = 0
-        self.last_soft_at = now
-
-    def note_failure(self, message):
-        """5xx / transport failure: feed the breaker counter."""
-        with self._throttle_lock:
-            self.last_error = str(message)[:200]
-            self._decay_strikes()
-            self.fails += 1
-            if self.fails >= BREAKER_THRESHOLD:
-                wait = breaker_backoff(self.fails)
-                self.breaker_until = max(self.breaker_until, time.time() + wait)
-        return self.breaker_until
-
-    def note_unknown_failure(self, message):
-        """Unknown error: degrade counter plus the shared breaker counter."""
-        with self._throttle_lock:
-            self.last_error = str(message)[:200]
-            self._decay_strikes()
-            self.degrade_count += 1
-            self.fails += 1
-            now = time.time()
-            if self.degrade_count >= DEGRADE_THRESHOLD:
-                wait = degrade_backoff(self.degrade_count)
-                self.degrade_until = max(self.degrade_until, now + wait)
-            if self.fails >= BREAKER_THRESHOLD:
-                wait = breaker_backoff(self.fails)
-                self.breaker_until = max(self.breaker_until, now + wait)
-        return self.degrade_until
-
-    def note_success(self, model=None):
-        """A served request clears every account-level penalty."""
-        dropped = False
-        with self._throttle_lock:
-            if model:
-                dropped = self.model_cooldowns.pop(model, None) is not None
-            self.soft_streak = 0
-            self.unscoped_streak = 0
-            self.fails = 0
-            self.degrade_count = 0
-            self.last_fail_at = 0.0
-            self.last_soft_at = 0.0
-            self.breaker_until = 0.0
-            self.degrade_until = 0.0
-            self.last_error = ""
-            self.last_error_detail = ""
-            self.cooldown_until = 0.0
-            # A credential-shaped 401 parks the account (ready() drops it), but
-            # the token demonstrably works now (hub 392410b): lift it here
-            # instead of waiting for a refresh or a restart.
-            self.token_expired = False
-        if dropped:
-            # Only when a window really existed: this path runs per request.
-            self._persist_model_windows()
-
-    def _set_last_error(self, message):
-        """Record a refresh error in the account's runtime state."""
-        with self._throttle_lock:
-            self.last_error = str(message)[:200]
-
-    def note_error(self, message, cooldown=60, single_account=False, model=None, until=None):
-        persist_window = False
-        with self._throttle_lock:
-            self.last_error = str(message)[:200]
-            if _auth_failure_text(message):
-                self.token_expired = True
-            if model:
-                # Model-scoped: the account stays usable for every other model.
-                wait = max(1.0, float(until) - time.time()) if until else (
-                    3.0 if single_account else float(cooldown))
-                self.model_cooldowns[model] = time.time() + wait
-                persist_window = True
-            else:
-                actual_cooldown = 3 if single_account else cooldown
-                self.cooldown_until = time.time() + actual_cooldown
-        if persist_window:
-            # A 429 reset instant outlives the process; without this a restart
-            # both forgets the park and re-serves the exhausted window.
-            self._persist_model_windows()
-
-    def _persist_model_windows(self):
-        """Write the credential now; best-effort, never raises into the caller."""
-        if not self.path:
-            return
-        try:
-            self.save(os.path.dirname(self.path))
-        except Exception as exc:
-            log("account %s: model window save failed: %s" % (self.uid, exc))
-
-    def throttle_wait(self, model=None):
-        """Seconds until this account can serve `model` again (0 = right now)."""
-        if not self.enabled or not self.access_token:
-            return 0.0
-        now = time.time()
-        with self._throttle_lock:
-            wait = max(0.0, self.cooldown_until - now,
-                       self.balance_until - now, self.breaker_until - now,
-                       self.degrade_until - now)
-            if model:
-                wait = max(wait, max(0.0, self.model_cooldowns.get(model, 0.0) - now))
-        return wait
-
-    def clear_error(self, model=None):
-        changed = False
-        with self._throttle_lock:
-            if model:
-                changed = self.model_cooldowns.pop(model, None) is not None
-            else:
-                changed = bool(self.model_cooldowns)
-                self.model_cooldowns.clear()
-            if self.last_error or self.cooldown_until or self.balance_until:
-                self.last_error = ""
-                self.cooldown_until = 0
-                self.balance_until = 0.0
-        if changed:
-            self._persist_model_windows()
 
