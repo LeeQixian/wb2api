@@ -14,18 +14,19 @@ import urllib.request
 
 
 # -*- coding: utf-8 -*-
-"""Upstream keep-alive pool, keyed by (scheme, host, port, proxy, credential).
+"""Keep-alive HTTP pool keyed by (scheme, host, port, proxy, credential)."""
 
-Reuses http.client connections instead of urllib's do_open, which hardcodes
-Connection: close and pays a fresh TCP+TLS handshake per request.
+# Reuses http.client connections instead of urllib's do_open, which hardcodes
+# Connection: close and pays a fresh TCP+TLS handshake per request.
 
-Never pools (raises PoolBypass; callers fall back to urllib): non-http(s)
-URLs, non-HTTP proxies, and any 3xx response (redirect handling stays in
-urllib). Toggle off with WB_UPSTREAM_KEEPALIVE=0; sizes via
-WB_UPSTREAM_POOL_SIZE / WB_UPSTREAM_POOL_IDLE. Stale connections are swept
-across every pool key on reuse, not only the touched key. Two accounts never
-share one TCP/TLS connection: the credential digest is the last key dimension.
-"""
+# PoolBypass means callers fall back to urllib: non-http(s) URLs, non-HTTP
+# proxies, and any 3xx response (redirect handling stays in urllib).
+
+# WB_UPSTREAM_KEEPALIVE=0 disables the pool; WB_UPSTREAM_POOL_SIZE and
+# WB_UPSTREAM_POOL_IDLE size it. Stale connections are swept on every reuse.
+
+# Two accounts never share one TCP/TLS connection: the credential digest is
+# the last key dimension.
 
 #: Values of WB_UPSTREAM_KEEPALIVE that disable the pool; anything else is on.
 _KEEPALIVE_OFF = ("0", "off", "false", "no")
@@ -50,7 +51,7 @@ def ca_bundle_path():
             return path
         if name == "WB_CA_BUNDLE":
             raise RuntimeError("%s points to a missing file: %s" % (name, path))
-        # OpenSSL ignores a missing SSL_CERT_FILE; keep that leftover harmless.
+        # OpenSSL ignores a missing SSL_CERT_FILE, so that case stays harmless.
     return ""
 
 
@@ -483,7 +484,7 @@ def _header_lookup(pairs):
 
 def _identity_discriminator(req, ordered_headers=None):
     """Credential digest for the pool key; '' when the request has no credential.
-    Two accounts on one exit must never share a connection (#429)."""
+    Two accounts on one exit must never share a connection."""
     pairs = ordered_headers if ordered_headers is not None else list(req.headers.items())
     lookup = _header_lookup(pairs)
     for field in _IDENTITY_HEADER_FIELDS:
@@ -602,9 +603,9 @@ def egress_key(url, proxy=""):
     return (scheme, host, port, proxy_raw)
 
 def urlopen(req, timeout=30, proxy=""):
-    """Pooled urlopen; signature matches gateway.accounts.urlopen.
-    Retries once when a pooled connection was peer-closed (nothing was sent).
-    req.wb_exact_headers: ordered pairs sent with verbatim names (chat path)."""
+    """Pooled urlopen matching gateway.accounts.urlopen; retries once when a
+    pooled connection was peer-closed before anything was sent."""
+    # req.wb_exact_headers: ordered pairs sent with verbatim names (chat path).
     scheme, host, port, selector = _target_parts(req.full_url)
     proxy_raw = str(proxy or "").strip()
     # A bypassed host is direct (its key is the direct pool), matching urllib.

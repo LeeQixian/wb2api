@@ -74,8 +74,7 @@ def main(argv=None):
 
     _state.POOL = AccountPool(_state.ACCOUNTS_DIR, log=log)
     _state.POOL.load()
-    # settings/usage switches live next to the resolved dirs, not the
-    # import-time defaults (same trap the realm-state file used to have)
+    # Settings and usage paths follow the resolved dirs, not import-time defaults.
     upstream._POOL = _state.POOL
     upstream.USAGE_DIR = args.usage_dir
     translate.ACCOUNTS_DIR = args.accounts_dir
@@ -98,8 +97,8 @@ def main(argv=None):
         from gateway import scheduler as scheduler_mod
         scheduler = scheduler_mod.Scheduler(_state.POOL, log=log, enabled=True)
         scheduler.start()
-        # one billing call per tick, oldest balance first, because the
-        # dispatch preference reads account.credits. 0 disables it.
+        # One billing call per tick, oldest balance first: the dispatch
+        # preference reads account.credits.
         from gateway.accounts import CreditsRefresher
         refresher = CreditsRefresher(_state.POOL)
         refresher.start()

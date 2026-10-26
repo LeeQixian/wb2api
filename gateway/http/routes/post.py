@@ -113,7 +113,7 @@ class PostRoutes(object):
 
     def _handle_responses(self, payload):
         requested = str(payload.get("model") or "deepseek-v4.1-flash")
-        # The legacy /responses/compact path counts as compaction too.
+        # The /responses/compact path counts as compaction too.
         is_compact_path = self.path.split("?")[0].rstrip("/").endswith("/responses/compact")
         compaction = is_compact_path or translate.has_compaction_trigger(payload)
         model, prefix_realm = self._split_model(requested)
@@ -131,7 +131,7 @@ class PostRoutes(object):
         if blocked:
             return self._error(400, blocked, "invalid_request_error")
         session_key = extract_session_key(self.headers, payload)
-        # outbound and return path must see the same merged tool list
+        # Outbound and return path must see the same merged tool list.
         all_tools = payload.get("tools")
         all_tools = list(all_tools) if isinstance(all_tools, list) else []
         all_tools.extend(translate.additional_tools_from_input(payload))

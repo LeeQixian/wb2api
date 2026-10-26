@@ -14,7 +14,7 @@ DEGRADE_THRESHOLD = 5
 DEGRADE_COOLDOWN = 600.0
 DEGRADE_COOLDOWN_MAX = 7200.0
 # Strikes separated by more than this gap are no longer "consecutive";
-# WB_FAIL_WINDOW=0 restores the old accumulate-forever behavior.
+# WB_FAIL_WINDOW=0 disables the gap, so strikes accumulate forever.
 try:
     FAIL_WINDOW = max(0.0, float(os.environ.get("WB_FAIL_WINDOW") or 600.0))
 except (TypeError, ValueError):

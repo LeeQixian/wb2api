@@ -1,5 +1,4 @@
-"""Integration tests for gateway.server against a fake upstream.
-Fully offline: the real HTTP server is exercised against a local fake."""
+"""Integration tests for gateway.server against a fully offline fake upstream."""
 import json
 import os
 import socket
@@ -305,8 +304,8 @@ class TestAuth(ServerCase):
 
 class TestRealmGuards(ServerCase):
     def test_cn_only_model_auto_routes_without_header(self):
-        # regression: glm-5.3-flash on a global-intl gateway used to 400
-        # because the global realm masked the per-model auto-routing
+        # A cn-only model must auto-route on a global-intl gateway; the
+        # global realm must not mask per-model routing.
         self._patch_upstream("exclusive_realm", lambda m: "cn" if m == "glm-5.3-flash" else "")
         status, _ = self._post_chat(body={"model": "glm-5.3-flash", "messages":
                                           [{"role": "user", "content": "hi"}]})
@@ -418,8 +417,8 @@ class TestRealmPrefix(ServerCase):
         self.assertIn("前缀", json.loads(raw)["error"]["message"])
 
     def test_pinned_realm_does_not_leak_across_keepalive(self):
-        # regression guard for the per-instance reset: a prefixed request
-        # followed by a bare one on the SAME connection must not inherit cn
+        # Per-instance reset: a prefixed request followed by a bare one on
+        # the SAME connection must not inherit cn.
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         for model in ("cn:hy3", "hy3"):
@@ -446,7 +445,7 @@ class TestRealmPrefix(ServerCase):
             self.assertEqual(obj.get("model"), "cn:hy3")
 
     def test_models_lists_union_with_aliases(self):
-        # default GET /v1/models now carries both exits + cn:/global: aliases
+        # default GET /v1/models carries both exits plus cn:/global: aliases
         status, raw = self._request("/v1/models")
         data = json.loads(raw)
         self.assertEqual(status, 200)

@@ -1,5 +1,5 @@
-"""Built-in model catalog snapshots loaded from data/*.json.
-Live sources override them via upstream.catalog.merge_catalog()."""
+"""Built-in model catalog snapshots loaded from data/*.json."""
+# Live sources override these snapshots via upstream.catalog.merge_catalog().
 import json
 import os
 

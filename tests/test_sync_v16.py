@@ -1,5 +1,4 @@
-"""Regression pins for the hub v1.5.5..v1.6.10 sync.
-Each test defends one ported fix or a switch default that must stay off."""
+"""Tests for tool-choice handling, account guards, identity and translation edge cases."""
 import io
 import json
 import os
@@ -258,7 +257,7 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 
 class v1617Fixes(unittest.TestCase):
-    """Pins for the v1.6.11..v1.6.17 sync (the batch after 182abd2)."""
+    """Tests for live error state, output caps, tool-call merging and timeouts."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -270,7 +269,7 @@ class v1617Fixes(unittest.TestCase):
     def tearDown(self):
         tr.ACCOUNTS_DIR = self._saved
 
-    # ---- #144: live error state never comes off disk ----
+    # ---- live error state never comes off disk ----
     def test_stale_error_not_resurrected(self):
         jwt = make_jwt(uid="u1", iss="https://www.workbuddy.ai")
         a = Account({"accessToken": jwt, "uid": "u1",
@@ -285,7 +284,7 @@ class v1617Fixes(unittest.TestCase):
         self.assertNotIn("cooldownUntil", stored)
         self.assertIn("accessToken", stored)      # credential still lands
 
-    # ---- #121: catalog default output cap ----
+    # ---- catalog default output cap ----
     def test_max_tokens_defaults_from_catalog(self):
         declared = tr.model_default_max_output_tokens("hy3")
         body = tr.build_upstream_body(
@@ -313,7 +312,7 @@ class v1617Fixes(unittest.TestCase):
              "messages": [{"role": "user", "content": "x"}]})
         self.assertEqual(other["max_tokens"], 1)
 
-    # ---- #153: split batches merge back, truncated args drop ----
+    # ---- split batches merge back, truncated args drop ----
     def test_adjacent_tool_calls_merge(self):
         msgs = [{"role": "assistant", "content": "thinking",
                  "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{}"}}]},
@@ -342,7 +341,7 @@ class v1617Fixes(unittest.TestCase):
         self.assertNotIn(b"function_call_arguments.done", data)
         self.assertIn(b'"incomplete"', data)
 
-    # ---- #164: zero aliases never shadow a real hit ----
+    # ---- zero aliases never shadow a real hit ----
     def test_cache_alias_normalization(self):
         usage = {"prompt_tokens": 100, "total_tokens": 110,
                  "prompt_tokens_details": {"cached_tokens": 80},
@@ -353,7 +352,7 @@ class v1617Fixes(unittest.TestCase):
         resp = tr._responses_usage(usage)
         self.assertEqual(resp["input_tokens_details"]["cached_tokens"], 80)
 
-    # ---- #163: penalty windows and recovery ----
+    # ---- penalty windows and recovery ----
     def test_breaker_and_soft_rate_windows_block_pick(self):
         a = Account({"accessToken": make_jwt(uid="u1"), "uid": "u1"})
         a.note_failure("HTTP 502"); a.note_failure("HTTP 502")
@@ -377,7 +376,7 @@ class v1617Fixes(unittest.TestCase):
         self.assertFalse(up.rate_limit_is_account_level(
             "usage exceeds frequency limit, reset at 2026-10-09 08:00:00", 9e9))
 
-    # ---- #157: 402 parks until 04:00, balance revival lifts it ----
+    # ---- 402 parks until 04:00, balance revival lifts it ----
     def test_402_park_and_revive(self):
         a = Account({"accessToken": make_jwt(uid="u1"), "uid": "u1"})
         until = a.note_balance_cooled("HTTP 402 (insufficient credits)")
@@ -391,7 +390,7 @@ class v1617Fixes(unittest.TestCase):
         self.assertEqual(a.balance_until, 0.0)
         self.assertTrue(a.ready())
 
-    # ---- #148: header/idle timeouts, defaults = hub ----
+    # ---- header/idle timeouts and their defaults ----
     def test_upstream_timeout_defaults_and_override(self):
         import io as _io
         from gateway import upstream as up
@@ -434,7 +433,7 @@ class v1617Fixes(unittest.TestCase):
                     {"role": "user", "content": "x"}]}, target_realm="cn")
         self.assertEqual(captured["timeout"], 11.0)
 
-    # ---- #174: expiring-credits dispatch preference ----
+    # ---- expiring-credits dispatch preference ----
     def _acct(self, uid, days_left=None):
         a = Account({"accessToken": make_jwt(uid=uid, iss="https://www.workbuddy.ai"),
                      "uid": uid, "realm": "intl", "enabled": True})
@@ -470,7 +469,7 @@ class v1617Fixes(unittest.TestCase):
         self.assertIsNone(a.soonest_expiring_days())
         self.assertFalse(a.in_expiring_window())
 
-    # ---- #94: realm evidence, never a blind intl guess ----
+    # ---- realm evidence, never a blind intl guess ----
     def test_realm_evidence_and_domain_alignment(self):
         from gateway import accounts as ac
         cn_jwt = make_jwt(uid="u1", iss="https://copilot.tencent.com")
@@ -487,7 +486,7 @@ class v1617Fixes(unittest.TestCase):
                                          "account": {"uid": "u1"}})
         self.assertEqual(kwargs["realm"], "cn")
 
-    # ---- #174 support: credits refresher ----
+    # ---- credits refresher ----
     def test_refresher_refreshes_stalest_account_once(self):
         from gateway.accounts import CreditsRefresher
         pool = AccountPool(self.dir)
@@ -514,7 +513,7 @@ class v1617Fixes(unittest.TestCase):
         with mock.patch.object(Account, "fetch_credits", fake_fetch):
             self.assertIsNone(r.refresh_once())   # disabled
 
-    # ---- #160: gateway system-prompt modes ----
+    # ---- gateway system-prompt modes ----
     def test_prompt_modes(self):
         def body(**kw):
             m = {"model": "hy3", "messages": [{"role": "user", "content": "x"}]}

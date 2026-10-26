@@ -1,5 +1,4 @@
-"""Regression pins for the hub v1.6.18..v1.7.2 sync batch.
-Each test defends one ported upstream fix; hub commits cited per class."""
+"""Tests for rate-limit wording, scope classification, rotation and task chains."""
 import io
 import json
 import os
@@ -31,7 +30,7 @@ def fake_http_error(code, payload):
 
 
 class ResetWording(unittest.TestCase):
-    # hub a351df9: the cn 429 wording ("... will reset at ...")
+    # cn 429 wording: "... will reset at ..."
     def test_cn_and_en_both_parse(self):
         cn = up.parse_rate_limit_reset("用量已超出频率限制，将在 2026-10-09 14:44:59 UTC+8 重置")
         en = up.parse_rate_limit_reset("usage will reset at 2026-10-09 14:44:59 UTC+8")
@@ -43,7 +42,7 @@ class ResetWording(unittest.TestCase):
 
 
 class ScopePhrases(unittest.TestCase):
-    # hub 72e51b4: word-boundary matching; identifiers are not scope statements
+    # word-boundary matching; identifiers are not scope statements
     def test_metadata_tail_does_not_scoped_match(self):
         body = '{"code":14003,"msg":"too many requests","accountId":"a","credentialId":"c"}'
         self.assertFalse(up.rate_limit_is_account_level(body, None))
@@ -60,7 +59,7 @@ class ScopePhrases(unittest.TestCase):
 
 
 class UnscopedLadder(unittest.TestCase):
-    # hub 72e51b4: separate 60s->600s ladder; never feeds the credential ladder
+    # separate 60s->600s ladder; never feeds the credential ladder
     def setUp(self):
         self.a = Account({"accessToken": make_jwt(), "uid": "u1", "realm": "cn"})
 
@@ -82,7 +81,7 @@ class UnscopedLadder(unittest.TestCase):
 
 
 class Dispatch429(unittest.TestCase):
-    # hub dc1a565/72e51b4 at the dispatch level
+    # 429 dispatch: short ladder for unscoped shapes, flat 60s otherwise
     def open_with(self, pool, responses, **kw):
         payload = {"model": "hy3", "messages": [{"role": "user", "content": "hi"}]}
         with mock.patch.object(up.wb_accounts, "urlopen",
@@ -110,7 +109,7 @@ class Dispatch429(unittest.TestCase):
 
 
 class Restricted403(unittest.TestCase):
-    # hub be4f9f8
+    # restricted-account 403: recognize, park, rotate
     def test_recognition_and_false_positive(self):
         hit = '{"code":11140,"msg":"request illegal","displayMsg":{"en":"Your ' \
               'account has been restricted due to unusual activity"}}'
@@ -153,7 +152,7 @@ class Restricted403(unittest.TestCase):
 
 
 class Checkin10001(unittest.TestCase):
-    # hub 0ba3a29: upstream answers "already checked in" as HTTP 400/code 10001
+    # upstream answers "already checked in" as HTTP 400/code 10001
     def test_already_checked_in_counts_success(self):
         d = tempfile.mkdtemp()
         a = Account({"accessToken": make_jwt(), "uid": "c1", "realm": "cn"})
@@ -177,7 +176,7 @@ class Checkin10001(unittest.TestCase):
 
 
 class StopNormalize(unittest.TestCase):
-    # hub c3f263d: upstream Go struct pins stop to []string (code 11101)
+    # upstream Go struct pins stop to []string (code 11101)
     def body(self, stop):
         p = {"model": "hy3", "messages": [{"role": "user", "content": "x"}]}
         if stop is not None:
@@ -197,7 +196,7 @@ class StopNormalize(unittest.TestCase):
 
 
 class AdditionalTools(unittest.TestCase):
-    # hub fb10152 + 23964ac (Codex Desktop 0.162+)
+    # additional tool shapes: namespaces and custom tools
     CUSTOM_EXEC = {"type": "custom", "name": "exec",
                    "format": {"type": "grammar", "syntax": "lark", "definition": "s: /x/"}}
     PLAIN = {"type": "function", "name": "wait",
@@ -245,14 +244,14 @@ class AdditionalTools(unittest.TestCase):
         self.assertEqual(item2.get("arguments"), '{"ms":100}')
 
     def test_finish_reason_empty_string_normalized(self):
-        # hub #296
+        # empty finish_reason normalizes to null
         chunk = '{"choices":[{"delta":{"content":"x"},"finish_reason":""}]}'
         cleaned = json.loads(tr.clean_chunk(chunk))
         self.assertIsNone(cleaned["choices"][0]["finish_reason"])
 
 
 class UnavailableReason(unittest.TestCase):
-    # hub f398a3c
+    # one human-readable reason per penalty state
     def setUp(self):
         self.a = Account({"accessToken": make_jwt(exp=time.time() + 7200),
                           "uid": "u1", "realm": "cn"})
@@ -274,7 +273,7 @@ class UnavailableReason(unittest.TestCase):
 
 
 class EnterpriseSkip(unittest.TestCase):
-    # hub 07d033c
+    # enterprise accounts skip check-in and growth tasks
     def ent(self, **extra):
         tok = make_jwt(**{k: v for k, v in extra.items() if k == "enterprise_id"}) \
             if extra else make_jwt()
@@ -306,7 +305,7 @@ class EnterpriseSkip(unittest.TestCase):
 
 
 class DailyChatWebLeg(unittest.TestCase):
-    # hub 93e9f26: failed web leg must not close the day
+    # failed web leg must not close the day
     class FakeResp:
         def read(self, *x):
             return b"ok"
@@ -330,7 +329,7 @@ class DailyChatWebLeg(unittest.TestCase):
         with mock.patch.object(acc_mod, "urlopen",
                                lambda *x, **k: self.FakeResp()):
             res = a.daily_chat(web=True)
-        self.assertFalse(res["ok"])   # hub ddda600: web leg owns the verdict
+        self.assertFalse(res["ok"])   # the web leg owns the verdict
         self.assertIsNone(a.last_daily_chat)
         self.assertTrue(a.can_daily_chat())
 
@@ -353,7 +352,7 @@ class DailyChatWebLeg(unittest.TestCase):
 
 
 class HotPath(unittest.TestCase):
-    # hub 8bc1f0d
+    # hot-path helpers must match their reference implementations
     def test_fingerprint_literal_path_matches_regex_semantics(self):
         import re
         cases = [
@@ -404,7 +403,7 @@ class HotPath(unittest.TestCase):
 
 
 class PerfWiring(unittest.TestCase):
-    # hub 3def05a + d419dab
+    # socket, pool and egress-key wiring
     def test_server_socket_options(self):
         from gateway import server as srv
         self.assertTrue(srv.Handler.disable_nagle_algorithm)
@@ -447,7 +446,7 @@ class PerfWiring(unittest.TestCase):
 
 
 class GrowthPrereqChain(unittest.TestCase):
-    # hub 1fd0194 + 0970a5d
+    # growth task prerequisite ordering
     def task(self, code, status="not_accepted", current=0, target=1, task_type=""):
         return {"task_code": code, "name": code, "description": "", "jump_url": "",
                 "status": status, "task_type": task_type, "current": current,

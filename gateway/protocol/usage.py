@@ -2,7 +2,7 @@
 
 
 def _best_cached_tokens(usage):
-    """Best cache-hit value across every alias the upstreams emit (E3).
+    """Best cache-hit value across every alias the upstreams emit.
     prompt_tokens_details.cached_tokens first; a zero alias never wins."""
     if not isinstance(usage, dict):
         return 0

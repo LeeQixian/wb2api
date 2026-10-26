@@ -213,8 +213,7 @@ class AccountPool(object):
         return account
 
     def import_credential(self, blob, realm=None):
-        """Register an account from desktop/hub credential JSON (see
-        credential_to_kwargs). Returns the Account."""
+        """Register an account from desktop or flat credential JSON."""
         account = Account(credential_to_kwargs(blob, realm=realm))
         self.add(account)
         return account

@@ -52,14 +52,14 @@ class GetRoutes(object):
         req_realm = self._request_realm()
         try:
             if req_realm in ("intl", "cn"):
-                # explicit single-exit probe (X-Realm / ?realm=) keeps the
-                # narrow view of exactly that exit's catalog
+                # An explicit single-exit probe (X-Realm / ?realm=) keeps the
+                # narrow view of exactly that exit's catalog.
                 entries = upstream.fetch_models(realm=req_realm, pool=pool)
                 data = [upstream.model_entry(mid, meta) for mid, meta in entries]
                 return self._json(200, {"object": "list", "data": data,
                                         "realm": req_realm})
-            # No explicit realm: the full menu across BOTH exits with
-            # cn:/global: aliases, independent of the global default.
+            # No explicit realm: list both exits with cn:/global: aliases,
+            # independent of the global default.
             entries = upstream.fetch_models_all(pool=pool)
             data = [upstream.model_entry(mid, meta) for mid, meta in entries]
             return self._json(200, {"object": "list", "data": data, "realm": "all"})

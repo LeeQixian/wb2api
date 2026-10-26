@@ -1,5 +1,4 @@
-"""Regression pins for the hub v1.7.32..v1.8.0 sync (v1.7.33 + v1.8.0).
-Each test defends one ported upstream fix; hub commits cited per class."""
+"""Tests for token recovery, streaming deltas, desktop headers and session ledgers."""
 import json
 import os
 import sys
@@ -32,7 +31,7 @@ def _events(chunks, holder=None):
 
 
 class TokenRecovery(unittest.TestCase):
-    # hub 392410b: a served request lifts a credential-shaped park.
+    # a served request lifts a credential-shaped park.
     def test_success_clears_token_expired(self):
         a = Account({"accessToken": make_jwt(uid="u1"), "uid": "u1"})
         a.note_error("HTTP 401: unauthorized")
@@ -49,7 +48,7 @@ class TokenRecovery(unittest.TestCase):
 
 
 class FirstSegmentDeltas(unittest.TestCase):
-    # hub de4d86d: the first tool-call chunk may already carry arguments.
+    # the first tool-call chunk may already carry arguments.
     def _single(self, first_args, later_args):
         chunks = [{"choices": [{"delta": {"tool_calls": [{
             "index": 0, "id": "call_first", "type": "function",
@@ -119,7 +118,7 @@ class FirstSegmentDeltas(unittest.TestCase):
 
 
 class DesktopChatCompat(unittest.TestCase):
-    # hub d1a8913: WB_DESKTOP_CHAT_COMPAT=1 opts desktop chat into the SDK profile.
+    # WB_DESKTOP_CHAT_COMPAT=1 opts desktop chat into the SDK profile.
     def setUp(self):
         patcher = mock.patch.dict(os.environ, {}, clear=False)
         patcher.start()
@@ -182,7 +181,7 @@ class DesktopChatCompat(unittest.TestCase):
 
 
 class ModelWindowPersistence(unittest.TestCase):
-    # hub a6bb76a, local shape: 429 reset instants live in the credential file.
+    # 429 reset instants live in the credential file.
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -242,7 +241,7 @@ class ModelWindowPersistence(unittest.TestCase):
 
 
 class WebSessionLedger(unittest.TestCase):
-    # hub e5875ce / eddbc00 / c817a66: ledger + bounded + retry on failure.
+    # ledger is bounded and retries failed releases.
     def _account(self):
         return Account({"accessToken": make_jwt(uid="u1"), "uid": "u1",
                         "realm": "intl"})

@@ -1,5 +1,4 @@
-"""Offline tests for gateway.tasks / gateway.scheduler.
-Every upstream call is intercepted by a fake urlopen; sleep is recorded."""
+"""Offline tests for gateway.tasks and gateway.scheduler with a fake urlopen."""
 import io
 import json
 import os
@@ -277,7 +276,7 @@ class SchedulerBehaviour(unittest.TestCase):
 
 
 class WebAgentSetModel(unittest.TestCase):
-    # hub de4fb53: the manifest model is decorative; session/set_model pins it.
+    # the manifest model is decorative; session/set_model pins it.
     class Chan:
         def __init__(self, link, token, ua, log=None, proxy=""):
             self.requests = []
@@ -322,9 +321,7 @@ class WebAgentSetModel(unittest.TestCase):
 
 
 class LogSinkReentry(unittest.TestCase):
-    """A sink that calls log() again must not re-enter itself: the scheduler
-    used to install its own log as the process sink, which recursed ~500 deep
-    and prefixed every line with hundreds of "[调度器]"."""
+    """A sink that calls log() again must not re-enter itself or duplicate output."""
 
     def test_sink_calling_log_writes_one_line(self):
         from gateway.common import log as log_mod

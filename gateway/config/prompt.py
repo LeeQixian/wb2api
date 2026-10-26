@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Gateway system-prompt modes (settings.json prompt.mode): passthrough keeps
-the client's system/developer, custom replaces it, append inserts after it."""
+"""Gateway system-prompt modes: passthrough, custom (replace) or append (insert after)."""
 
 # Built-in prompt for custom/append; override with prompt.file.
 DEFAULT_PROMPT = """你是一名工程助手，幫助用戶完成軟件工程任務。
@@ -13,6 +12,7 @@ DEFAULT_PROMPT = """你是一名工程助手，幫助用戶完成軟件工程任
 - 如實報告失敗與邊界，不掩蓋、不粉飾。
 """
 
+# passthrough keeps the client's system/developer messages untouched.
 VALID_MODES = ("passthrough", "custom", "append")
 
 

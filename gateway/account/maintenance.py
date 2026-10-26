@@ -24,10 +24,8 @@ WEB_CONVERSATION_ACTIVE_LIMIT = 10
 WEB_CONVERSATION_PRUNE_KEEP = 8
 WEB_CONVERSATION_ACTIVE_STATUSES = ("working", "creating", "pending")
 
-# A turn thread can wedge in socket land (getaddrinfo ignores timeouts, a
-# drip-feeding peer never ends), so its finally block never runs and the
-# session keeps one of the 10 upstream slots. The registry is the ledger that
-# lets another thread close it. In-process only: the service restarts daily.
+# A turn thread can wedge in socket land, so its finally never runs and the session
+# holds one of the 10 upstream slots; this in-process ledger lets a sweeper close it.
 WEB_SESSION_REGISTRY_MAX = 128
 # Grace beyond the turn budget before a registered session counts as abandoned.
 WEB_SESSION_RECLAIM_GRACE = 300
@@ -53,7 +51,8 @@ def checkin_state(code, msg):
     if any(k in text for k in CHECKIN_PENDING_HINTS):
         return "pending"
     if code == 0:
-        # "不足" also appears in success text, so only "失败" is a hard failure.
+        # The insufficient-balance wording also appears in success text, so only
+        # the failure wording counts as a hard failure.
         return "failed" if any(k in text for k in CHECKIN_FAILURE_HINTS) else "checked"
     if code == 10001:
         return "already" if any(k in text for k in CHECKIN_ALREADY_HINTS) else "failed"
@@ -154,14 +153,14 @@ class MaintenanceMixin(object):
         body = {
             "prompt": prompt or DAILY_CHAT_WEB_PROMPT,
             "model": DAILY_CHAT_MODEL,
-            # These two ride every web-console session creation (captured); keep them.
+            # Both ride every web-console session creation; keep them.
             "conversationOrigin": "workbuddy-app",
             "plugins": [{"name": "weixinpay", "marketplace": "codebuddy-builtin"}],
         }
         conversation, failure = self._web_conversation_create(body)
         if failure and failure.get("limit"):
-            # Slots were leaked by older runs: stop the oldest gateway sessions
-            # and create once more; if nothing frees up, stop retrying.
+            # A leaked-slot limit: stop the oldest gateway sessions and create once
+            # more; if nothing frees up, do not retry again.
             freed = self.web_conversation_prune()
             if freed:
                 conversation, failure = self._web_conversation_create(body)
@@ -176,9 +175,8 @@ class MaintenanceMixin(object):
             return {"ok": False, "error": failure.get("message") or "建会话失败",
                     "retryable": bool(failure.get("retryable"))}
 
-        # Ledger it before the first network hop: from here on the slot is
-        # live upstream, and only this thread's finally (or the reclaimer)
-        # can give it back.
+        # Ledger it before the first network hop: the slot is live upstream from
+        # here on, and only this thread's finally or the reclaimer gives it back.
         self.web_session_register(conversation)
         keep = False
         try:
@@ -209,9 +207,8 @@ class MaintenanceMixin(object):
                     result.get("chunks") or 0, result.get("elapsed_ms") or 0)
             return result
         finally:
-            # Always release: a live session holds an active slot upstream.
-            # Successful runs are stopped (kept in history), failures deleted.
-            # A failed release keeps the entry so the reclaimer retries it.
+            # Always release: a live session holds a slot. Success stops it and keeps
+            # history, failure deletes it; a failed release stays for the reclaimer.
             self.web_session_mark(conversation, delete=not keep)
             if self.web_conversation_release(conversation, delete=not keep):
                 self.web_session_release(conversation)
@@ -263,8 +260,7 @@ class MaintenanceMixin(object):
 
     def web_session_register(self, conversation, delete=True):
         """Ledger a live session so a wedged turn cannot leak the slot forever.
-        `delete` is what a reclaim should do: failed runs leave nothing worth
-        keeping, a finished run only needs its slot back (history stays)."""
+        `delete` is what a reclaim does: failures delete, finished runs only stop."""
         if not conversation:
             return
         with self._web_sessions_lock:
@@ -295,8 +291,7 @@ class MaintenanceMixin(object):
 
     def reclaim_web_sessions(self, max_age=None, now=None):
         """Close sessions whose turn thread never reached its finally block.
-        Entries stay registered when the stop/delete call fails, so the next
-        sweep retries instead of leaking the slot for good (hub c817a66)."""
+        A failed stop/delete stays registered so the next sweep retries it."""
         if max_age is None:
             max_age = WEB_TURN_TIMEOUT + WEB_SESSION_RECLAIM_GRACE
         now = time.time() if now is None else now

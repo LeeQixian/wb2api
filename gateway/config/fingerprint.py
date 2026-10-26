@@ -1,5 +1,4 @@
-"""Device fingerprint derivation: ids per (uid + salt), stable and distinct
-across accounts; never process-level constants (they would link accounts)."""
+"""Device fingerprint ids derived per (uid, salt): stable, account-distinct, never process constants."""
 import hashlib
 import time
 import uuid
@@ -19,7 +18,7 @@ def session_id(uid: str) -> str:
 
 
 def generate_request_id(uid: str = "") -> str:
-    """X-Request-ID: random 32-hex, not account-derived (5.8.4 shape)."""
+    """X-Request-ID: random 32-hex, not account-derived."""
     return uuid.uuid4().hex
 
 

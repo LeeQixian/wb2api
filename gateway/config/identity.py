@@ -1,5 +1,4 @@
-"""Outbound identities (desktop / VSCode / CLI); single source of versions/UAs.
-All three must send the conversation header family or upstream 400s (code 11-128)."""
+"""Outbound identities (desktop / VSCode / CLI); single source of versions and UAs."""
 
 import gzip
 import hashlib
@@ -10,18 +9,21 @@ import secrets
 import time
 import uuid
 
-# Desktop intl per the 5.8.4 capture; UA tail is the bundled CLI version.
+# All three identities must send the conversation header family, or the
+# upstream answers 400 with code 11-128.
+
+# Desktop intl identity; the UA tail is the bundled CLI version.
 DESKTOP_VERSION_INTL = "5.8.4"
 DESKTOP_UA_INTL = "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0"
-# Desktop cn: no complete capture after 5.5.6; pinned, never guessed forward.
+# Desktop cn identity is pinned; never guess it forward.
 DESKTOP_VERSION_CN = "5.5.6"
 DESKTOP_UA_CN = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
 
-# Official CodeBuddy CLI version (npm @tencent-ai/codebuddy-code unpacked).
+# Official CodeBuddy CLI identity version.
 DEFAULT_IDE_VERSION = "2.168.2"
 
-# OpenAI Node SDK 6.25.0 fingerprint headers on the CLI chat wire; host
-# defaults overridable via WB_IDENTITY_OS / _ARCH / _NODE_VERSION.
+# OpenAI Node SDK fingerprint headers on the CLI chat wire; host values are
+# overridable via WB_IDENTITY_OS / _ARCH / _NODE_VERSION.
 def _identity_os():
     override = str(os.environ.get("WB_IDENTITY_OS") or "").strip()
     if override:
@@ -71,8 +73,8 @@ CLI_CACHE_RETENTION = "long"
 # Fields the official CLI never sends in a chat body.
 CLI_BODY_DROP_FIELDS = ("metadata", "conversation_id", "previous_response_id")
 
-# Official VSCode extension 4.12.39997873; no host IDE here, so
-# WB_VSCODE_IDE_VERSION overrides the platform version segment.
+# Official VSCode extension identity; no host IDE here, so WB_VSCODE_IDE_VERSION
+# overrides the platform version segment.
 VSCODE_PRODUCT_VERSION = "4.12.39997873"
 VSCODE_IDE_VERSION = "1.119.0"
 VSCODE_PLATFORM = "VSCode"
@@ -90,7 +92,7 @@ def vscode_ua():
                             VSCODE_PRODUCT_NAME, VSCODE_PRODUCT_VERSION)
 
 
-# Legacy aliases kept for external scripts reading the old names.
+# Alias names that external scripts import.
 DEFAULT_WORKBUDDY_IDE_VERSION = VSCODE_IDE_VERSION
 DEFAULT_WORKBUDDY_PRODUCT_VERSION = VSCODE_PRODUCT_VERSION
 
@@ -145,7 +147,7 @@ def uuid7():
 
 
 def new_conversation_id():
-    """X-Conversation-ID: hyphenated UUID (5.8.4 shape)."""
+    """X-Conversation-ID: hyphenated UUID."""
     return str(uuid7())
 
 
@@ -163,7 +165,7 @@ def conversation_id_for(uid, session_key):
 
 
 def new_message_id():
-    """Request/message ids: 32-hex UUIDv7 (5.8.4 shape)."""
+    """Request/message ids: 32-hex UUIDv7."""
     return uuid7().hex
 
 
@@ -266,9 +268,8 @@ def build_identity_headers(product, realm, uid, token,
         compat = desktop_chat_compat_enabled()
         headers.update(trace_headers(with_parent=compat))
         if compat:
-            # Desktop profile reported by the panel's headers.go (CN 5.8.3 /
-            # intl 5.8.4); shared SDK values remain configurable. Not a claim
-            # that Python's TLS stack matches the official client.
+            # Desktop profile headers; the shared SDK values stay configurable.
+            # Python's TLS stack is not claimed to match the official client.
             sdk_headers = cli_stainless_headers()
             # Desktop request timeout is not verified; do not copy CLI's budget.
             sdk_headers.pop("x-stainless-timeout", None)

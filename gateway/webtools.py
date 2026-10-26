@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Gateway-run web_search / web_fetch (switch: settings.local_web_tools).
-No upstream search backend, so the gateway runs the calls itself (DuckDuckGo)."""
+"""Gateway-run web_search / web_fetch, backed by DuckDuckGo HTML."""
+# Enabled by settings.local_web_tools; upstream offers no search backend.
 
 import html as _html
 import json
@@ -13,7 +13,7 @@ import urllib.request
 WEB_SEARCH_NAME = "web_search"
 WEB_FETCH_NAME = "web_fetch"
 
-    # Clients declare the same tool under these types.
+# Clients declare the same tool under these types.
 SEARCH_DECL_TYPES = ("web_search", "web_search_preview", "web_search_preview_2025_03_11")
 FETCH_DECL_TYPES = ("web_fetch",)
 
@@ -113,8 +113,8 @@ def client_wants_web(tools):
 
 
 def install_tool_defs(chat_tools, wants):
-    """Replace the client's web-tool declarations with our functions.
-    Same-named entries go first, so upstream never sees two web_search tools."""
+    """Replace the client's web-tool declarations with our own functions.
+    Client entries with the same name are dropped, so upstream sees one web_search."""
     names = set()
     if wants.get("search"):
         names.add(WEB_SEARCH_NAME)

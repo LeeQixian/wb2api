@@ -137,8 +137,8 @@ def stream_responses_events(upstream, model, holder):
     # Only reach for same-named calls when this request's definitions were the
     # gateway's own (see web_tools_active); otherwise they belong to the client.
     _own_web_tools = web_tools_active(holder.get("base_body"))
-    # Echo the request capabilities the client actually sent, same as the
-    # non-streaming path; these were hardcoded before.
+    # Echo the request capabilities the client actually sent, matching the
+    # non-streaming path.
     meta = holder.get("request_meta") or {}
     def resp_obj(status):
         obj = {
@@ -390,8 +390,8 @@ def stream_responses_events(upstream, model, holder):
                     "prompt_tokens_details": {"cached_tokens": 0},
                 }
                 holder["usage"] = usage
-        # DeepSeek sometimes spends the whole round on reasoning and returns no
-        # text; a completed response would hide that, so fail it (issue #508).
+        # DeepSeek can spend the whole round on reasoning with no text; a
+        # completed response would hide that, so fail it instead.
         empty_reasoning_only = (
             not full_text.strip()
             and bool("".join(reason_parts).strip())
@@ -510,9 +510,8 @@ def stream_responses_events(upstream, model, holder):
                             entry["custom"] = True
                     if fn_args:
                         entry["arguments"] += fn_args
-                # The first chunk may already carry arguments (hub de4d86d).
-                # Emit them after output_item.added like later chunks, without
-                # accumulating them twice: the new-entry branch stored them.
+                # The first chunk may already carry arguments; emit them after
+                # output_item.added without counting them twice (already stored).
                 if fn_args:
                     if entry.get("custom"):
                         yield ev("response.custom_tool_call_input.delta", {

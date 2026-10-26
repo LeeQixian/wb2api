@@ -1,5 +1,4 @@
-"""wbctl - account/key/switch management for wb2api.
-Full command guide: USAGE.md; every subcommand documents itself in --help."""
+"""wbctl - account/key/switch management for wb2api; see USAGE.md and per-command --help."""
 import argparse
 import getpass
 import os
@@ -50,7 +49,7 @@ def cmd_import(args):
     if blob == "-":
         blob = sys.stdin.read().strip()
     elif os.path.isfile(blob):
-        # credential file: desktop .info, hub accounts/*.json, or a bare token
+        # Credential file: desktop .info, accounts JSON, or a bare token.
         with open(blob, encoding="utf-8") as fh:
             blob = fh.read().strip()
     account = pool.import_credential(blob, realm=args.realm)

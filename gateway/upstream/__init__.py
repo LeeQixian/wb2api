@@ -1,5 +1,4 @@
-"""Upstream facade: exposes the outbound-request surface as gateway.upstream.X.
-Implementation lives in the sibling modules; live state is re-exported."""
+"""Upstream facade: the outbound-request surface re-exported from sibling modules."""
 import sys
 import types
 

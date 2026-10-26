@@ -47,9 +47,8 @@ def _flatten_content(content):
     return chr(10).join(t for t in texts if t)
 
 
-# Codex remote compaction v2: the client sends the retained history plus a
-# {"type":"compaction_trigger"} item and expects one `compaction` output item.
-# The summary travels in that item's opaque encrypted_content field.
+# Codex remote compaction v2: history plus a {"type":"compaction_trigger"} item;
+# the answer is one `compaction` item with the summary in encrypted_content.
 COMPACTION_PROMPT = (
     "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff "
     "summary for another LLM that will resume the task.\n\n"
@@ -373,8 +372,8 @@ def responses_to_chat(payload, compaction=False):
     if payload.get("max_output_tokens") is not None:
         chat["max_tokens"] = payload["max_output_tokens"]
     else:
-        # same catalog default as build_upstream_body, so the value is
-        # already right before the echo of request_meta happens.
+        # Same catalog default as build_upstream_body; the value is already
+        # right before request_meta is echoed.
         default_max = model_default_max_output_tokens(payload.get("model"))
         if default_max:
             chat["max_tokens"] = default_max

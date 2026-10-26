@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""wb2api - minimal local WorkBuddy -> OpenAI-compatible gateway (stdlib only).
-Routes: /health /realm /v1/models /credits /v1/chat/completions /v1/responses."""
+"""wb2api - minimal local WorkBuddy -> OpenAI-compatible gateway (stdlib only)."""
+# Routes: /health /realm /v1/models /credits /v1/chat/completions /v1/responses.
 import os
 import sys
 import types
@@ -22,7 +22,7 @@ from gateway.http.state import (  # noqa: F401
     _pool_lock,
 )
 
-#: import-time defaults kept for callers that read them directly.
+#: Import-time default directories, exported for callers that read them here.
 DEFAULT_ACCOUNTS_DIR = _state._DEFAULT_ACCOUNTS_DIR
 DEFAULT_USAGE_DIR = _state._DEFAULT_USAGE_DIR
 

@@ -15,7 +15,7 @@ REALM_CONFIGS = {
         "billing_upstream": "https://www.workbuddy.ai",
         "origin": "https://www.workbuddy.ai",
         "domain": "www.workbuddy.ai",
-        # Single source: wb_identity (intl chat UA was once left stale here).
+        # Single source: wb_identity, so the intl chat UA cannot drift.
         "chat_ua": wb_identity.DESKTOP_UA_INTL,
         "billing_ua": "WorkBuddy/%s" % wb_identity.DESKTOP_VERSION_INTL,
         "has_checkin": False,

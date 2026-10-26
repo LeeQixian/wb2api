@@ -178,8 +178,8 @@ def sanitize_messages(messages):
             item = dict(m)
             keep_result = (preserve_request_contract_enabled()
                            and item.get("role") in ("tool", "function"))
-            # Identity rules never touch user/tool data (#537); assistant
-            # history is included because the same sentence 400s there (#574).
+            # Identity rules never touch user/tool data; assistant history is
+            # included because the same sentence 400s there too.
             identity = item.get("role") in ("system", "developer", "assistant")
             if "content" in item and not keep_result:
                 item["content"] = sanitize_content(item["content"], identity=identity)

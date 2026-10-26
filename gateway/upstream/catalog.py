@@ -86,8 +86,8 @@ def merge_catalog(primary, realm=None, extras=False):
     live_ids = set(mid for mid, _meta in (primary or []))
     for item in source_static:
         mid = item.get("id")
-        # A paid model upstream still ships but whose free twin it retired:
-        # keep the bundled "-f" out, or the picker offers a dead free model.
+        # Upstream serves a paid model whose free twin is gone: keep the bundled
+        # "-f" out, or the picker offers a dead free model.
         if (mid == "hy4-preview-f" and "hy4-preview" in live_ids
                 and "hy4-preview-f" not in live_ids):
             continue
@@ -100,7 +100,7 @@ def merge_catalog(primary, realm=None, extras=False):
             continue
         if meta:
             base = merged.get(mid) or {}
-            # the live catalogue rarely restates every reasoning field,
+            # The live catalogue rarely restates every reasoning field,
             # so merge per field instead of overwriting the bundled block.
             base_reasoning = base.get("reasoning")
             base.update(meta)
@@ -134,7 +134,7 @@ def merge_catalog(primary, realm=None, extras=False):
 
 def fetch_endpoint_models(pool=None, realm="intl"):
     """Live menu, fetched from the SAME host the chat requests go to.
-    Hardwiring workbuddy.ai listed cn models the domestic servers lack."""
+    A fixed host would list models the account's own exit lacks."""
     account = pool.pick(realm=realm) if pool else None
     if account is None:
         log("model discovery skipped: no usable %s account" % realm)
@@ -278,8 +278,8 @@ def curate_remote_catalog(realm, ids, meta=None):
             continue
         if mid.endswith(VARIANT_SUFFIXES):
             continue
-        # Only live siblings count: the bundled snapshot may still list a free
-        # twin upstream has since retired, and that would drop the paid model.
+        # Only live siblings count: the bundled snapshot may list a free twin
+        # that is gone upstream, and that would drop the paid model.
         if mid.endswith("-f"):
             base = mid[:-2]
             if base in live and free(base) and not free(mid):
@@ -352,8 +352,8 @@ def fetch_models(realm=None, pool=None):
         if r in ("intl", "cn"):
             live, extras = curated_live_sources(r, pool=pool)
             if not live:
-                # The narrow endpoint is not the desktop catalogue, so it keeps
-                # the old whitelist behaviour: only names the order table knows.
+                # The narrow endpoint is not the desktop catalogue, so it keeps the
+                # whitelist behaviour: only names the order table knows.
                 live = [(m, {}) for m in fetch_endpoint_models(pool=pool, realm=r)]
                 extras = False
         entries = merge_catalog(live, realm=r, extras=extras)
@@ -452,7 +452,7 @@ def model_entry(mid, meta):
         item["reasoning_default_effort"] = reasoning["defaultEffort"]
     if reasoning.get("canDisableThinking") is not None:
         item["reasoning_can_disable"] = reasoning["canDisableThinking"]
-    # DeepSeek 4.1 official supports low / high / max
+    # This model officially supports only low / high / max effort.
     if mid == "deepseek-v4.1-flash":
         item["reasoning_efforts"] = ["low", "high", "max"]
         item["reasoning_default_effort"] = "high"

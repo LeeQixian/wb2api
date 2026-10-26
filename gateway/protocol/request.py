@@ -71,7 +71,7 @@ def apply_model_aliases(payload, aliases):
 
 def default_reasoning_effort_mode():
     """How to fill reasoning_effort when the client left it out.
-    high = catalog default else "high" (legacy); catalog = catalog only; off = never."""
+    high = catalog default else "high"; catalog = catalog only; off = never."""
     raw = os.environ.get("WB_DEFAULT_REASONING_EFFORT", "").strip().lower()
     if raw in ("off", "none", "0", "false", "no"):
         return "off"
@@ -100,8 +100,8 @@ def build_upstream_body(payload):
     messages = backfill_reasoning_content(
         messages, model, thinking_enabled=thinking_enabled
     )
-    # system-prompt mode. passthrough keeps the client's messages (and
-    # tops up a placeholder), custom replaces them, append inserts after them.
+    # System-prompt mode: passthrough keeps the client's messages (and tops up
+    # a placeholder), custom replaces them, append inserts after them.
     mode, text = prompt_mode_config()
     messages = wb_prompt.apply_mode(messages, mode, text, placeholder=state.SYSTEM_PROMPT)
     body = dict(payload)
@@ -109,7 +109,7 @@ def build_upstream_body(payload):
     # dropped here: they are not part of the upstream protocol.
     for _marker in [k for k in body if str(k).startswith("_")]:
         body.pop(_marker, None)
-    # dict(payload) copies the raw model name; overwrite it with the alias.
+    # dict(payload) copies the model name; write the resolved one back.
     body["model"] = model
     body["messages"] = messages
     # Repair tool-call pairing before the body leaves, or upstream rejects
@@ -130,7 +130,7 @@ def build_upstream_body(payload):
     normalize_tool_choice(body)
     normalize_tools(body)
     normalize_stop(body)
-    # when the client omits max_output_tokens, default to the catalog's
+    # When the client omits max_output_tokens, default to the catalog's
     # maxOutputTokens; an explicit value always wins.
     if "max_tokens" not in body:
         default_max = model_default_max_output_tokens(model)
@@ -284,7 +284,7 @@ def _normalize_tool_parameters(fn):
 
 
 def normalize_tools(obj):
-    # Legacy clients may still send root-level functions instead of tools.
+    # Clients may still send root-level functions instead of tools.
     if "functions" in obj and "tools" not in obj:
         funcs = obj.pop("functions")
         if isinstance(funcs, list):
@@ -383,7 +383,7 @@ def prompt_cache_key_enabled():
 
 def inject_prompt_cache_key(body, uid, conversation):
     """Add the upstream prompt_cache_key so its prefix cache can be reused.
-    Experiment only. The key carries the uid, never a fixed string."""
+    The key carries the uid, never a fixed string."""
     if not isinstance(body, dict):
         return body
     existing = body.get("prompt_cache_key")

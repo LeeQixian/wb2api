@@ -77,8 +77,8 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(a.uid, "uid-a")
         self.assertEqual(a.realm, "cn")  # issuer-driven
         self.assertEqual(a.expires_at, 1893456000)
-        # hub v1.6.3 (#76): the stored identity survives a restart; a file
-        # without the field falls back to the desktop identity.
+        # The stored product survives a restart; a file without the field
+        # falls back to the desktop identity.
         self.assertEqual(a.product, acct_mod.identity.PRODUCT_DESKTOP)
         b = Account({"accessToken": jwt, "product": "cli"})
         self.assertEqual(b.product, "cli")
@@ -128,8 +128,8 @@ class AccountTests(unittest.TestCase):
             self.assertIn("r-2", json.load(fh)["refreshToken"])
 
     def test_breaker_strikes_decay_outside_fail_window(self):
-        # Strikes separated by more than FAIL_WINDOW are not "consecutive":
-        # isolated blips must never park the account (hub 166a02b).
+        # Strikes separated by more than FAIL_WINDOW are not consecutive:
+        # isolated blips must never park the account.
         from gateway.account.backoff import FAIL_WINDOW
         a = Account({"accessToken": make_jwt(), "uid": "u1"})
         now = time.time()
@@ -178,7 +178,7 @@ class AccountTests(unittest.TestCase):
         a = Account({"accessToken": make_jwt(), "uid": "u1"})
         h = a.headers(purpose="chat")
         self.assertEqual(h["Authorization"], "Bearer " + a.access_token)
-        # Official chat never sends X-Machine-ID / X-Session-ID (5.8.4 wire).
+        # Official chat never sends X-Machine-ID / X-Session-ID.
         self.assertNotIn("X-Machine-ID", h)
         self.assertIn("X-Conversation-ID", h)
         self.assertIn("X-IDE-Type", h)  # chat identity header set
@@ -203,8 +203,8 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(a2.nickname, "n2")
 
     def test_import_credential_real_world_shape(self):
-        # literal structure of the old-proxy export:
-        # account{...} + auth{accessToken,refreshToken,expiresAt,domain,realm}
+        # Proxy export shape:
+        # account{...} plus auth{accessToken,refreshToken,expiresAt,domain,realm}
         from gateway.accounts import credential_to_kwargs
         token = make_jwt(uid="real-uid", exp=1899000000,
                          iss="https://www.workbuddy.ai")  # iss lies; realm field wins
@@ -240,7 +240,7 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(kw["realm"], "cn")
         self.assertEqual(kw["nickname"], "nicky")
         self.assertEqual(kw["refreshToken"], "rt-1")
-        # flat hub accounts/*.json shape
+        # flat accounts/*.json shape
         flat = {"uid": "u-flat", "accessToken": token, "enterpriseId": "e-9"}
         self.assertEqual(credential_to_kwargs(flat)["enterpriseId"], "e-9")
         # raw string passthrough
@@ -287,8 +287,8 @@ class PoolTests(unittest.TestCase):
         self.assertTrue(any("unreadable" in m for m in msgs))
 
     def test_count_ready_never_refreshes(self):
-        # regression: /health -> count_ready used to fire a 30s-timeout
-        # network refresh on any near-expiry token, hanging the probe
+        # /health must not fire a network refresh on a near-expiry token;
+        # count_ready stays offline while pick() may refresh.
         soon = make_jwt(uid="stale", exp=int(time.time()) + 60)
         a = self.pool.import_token(soon, refresh_token="rt")
         calls = []
@@ -301,8 +301,8 @@ class PoolTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
 
     def test_load_preserves_live_objects_across_hot_reload(self):
-        # regression: load() must not rebuild Account objects, or a losing
-        # writer could persist a dead rotated refresh token.
+        # load() must not rebuild Account objects, or a losing writer could
+        # persist a dead rotated refresh token.
         a = self.pool.import_token(make_jwt(uid="keep", exp=1893456000))
         a.model_cooldowns["hy3"] = time.time() + 300   # runtime state to keep
         # simulate a refresh that rotated tokens in memory ahead of the file

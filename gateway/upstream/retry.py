@@ -14,7 +14,7 @@ from gateway import settings as wb_settings
 from gateway.common.log import log
 
 
-#: Markers of a deterministic certificate/hostname failure (#441).
+#: Markers of a deterministic certificate/hostname failure.
 _TLS_VERIFY_MARKERS = (
     "certificate_verify_failed", "certificate verify failed",
     "self-signed certificate", "self signed certificate",
@@ -63,7 +63,7 @@ ACCOUNT_SCOPE_PHRASES = (
     "credential-level", "credential level", "credential scope",
     "credential limit", "per credential", "this credential",
     "the credential", "your credential",
-    # Keep the local wording (measured here); merge into the upstream table.
+    # Extra scope wordings on top of the upstream error table.
     "too many requests per account",
     "requests per minute per account",
     "hourly cap",
@@ -72,7 +72,7 @@ ACCOUNT_SCOPE_PHRASES = (
 )
 SOFT_LIMIT_MARKERS = ("usage exceeds frequency limit", "too many requests",
                       "请求过于频繁")
-SOFT_LIMIT_CODES = (14003,)     # intl, observed on a real 429
+SOFT_LIMIT_CODES = (14003,)     # intl soft-limit code on 429 bodies
 RESTRICTED_403_COOLDOWN = 7200.0
 _RESTRICTED_403_CODE_RE = re.compile(r'"code"\s*:\s*"?11140"?')
 _RESTRICTION_403_MARKERS = ("unusual activity", "账号存在异常行为", "已被限制")
@@ -156,13 +156,13 @@ def _network_error_details(exc):
     errors = (exc, getattr(exc, "reason", None))
     text = " ".join("%s %s" % (type(error).__name__, error)
                     for error in errors if error is not None).lower()
-    # HTTPError inherits OSError but delegates missing attrs to its response on
-    # Python 3.9; HTTP status is not an OS code, so never probe it.
+    # HTTPError inherits OSError but delegates missing attrs to its response,
+    # so an HTTP status is not an OS code: never probe it.
     codes = {getattr(error, attr, None) for error in errors
              if not isinstance(error, urllib.error.HTTPError)
              for attr in ("errno", "winerror")}
-    # Some callers keep only a string; match the whole number, since the old
-    # substring "errno 100" also matched Windows ECONNRESET (10054).
+    # Some callers keep only a string; match the whole number, because the
+    # substring "errno 100" would also match Windows ECONNRESET (10054).
     codes.update(int(code) for code in re.findall(
         r"\b(?:errno|winerror)\s+(-?\d+)\b", text))
     return codes, text
@@ -187,9 +187,8 @@ def is_transient(exc):
     )
     return any(m in t for m in markers)
 
-# Upstream bodies that name the model/service, not the credential: 11134 model
-# provider unavailable, 11102 service info not found, 11150 unsupported effort,
-# 11158 model not available, 11129 invalid function parameters.
+# Codes naming the model/service, not the credential: 11102 service info,
+# 11129 function parameters, 11134 provider, 11150 effort, 11158 availability.
 MODEL_SCOPED_ERROR_CODES = frozenset((11102, 11129, 11134, 11150, 11158))
 
 

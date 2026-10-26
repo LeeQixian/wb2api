@@ -386,7 +386,7 @@ def run_growth_tasks(account, gap=1.0):
     total_earned = 0
 
     # 0. Auto tasks need no accept and gate the single tasks and travel
-    #    (first_buddy grants the Buddy instance): light and claim first.
+    #    (first_buddy grants the Buddy instance), so light and claim them first.
     for t in tasks:
         if t.get("task_type") == "auto":
             total_earned += _progress_one(account, t, logs, gap)
@@ -426,13 +426,13 @@ def run_growth_tasks(account, gap=1.0):
             logs.append(f"! 仍有 {len(still_pending)} 个任务处于未接取状态，"
                         f"对未接取任务上报事件不会计入进度，本轮跳过这些任务")
 
-    # 2. Process each task (auto already handled in step 0).
+    # 2. Process each task; auto tasks already ran in step 0.
     for t in tasks:
         if t.get("task_type") == "auto":
             continue
         total_earned += _progress_one(account, t, logs, gap)
 
-    # 4. Also check cat travel.
+    # 3. Also check cat travel.
     from gateway.tasks.travel import do_cat_travel
     tr_res = do_cat_travel(account)
     if tr_res.get("msg"):
@@ -440,7 +440,7 @@ def run_growth_tasks(account, gap=1.0):
         if tr_res.get("credit"):
             total_earned += tr_res.get("credit", 0)
 
-    # 5. Refresh the credit balance.
+    # 4. Refresh the credit balance.
     account.fetch_credits()
     logs.append(f"🎉 全部完成！本次累计新增到账: +{total_earned} 积分，当前总剩余: {account.credits.get('remain', 0)} 积分")
     return {"ok": True, "logs": logs, "earned_credit": total_earned, "credits": account.credits}

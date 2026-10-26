@@ -1,5 +1,4 @@
-"""Tests for the module-layout refactor and its two behaviour changes.
-Facade transparency, catalog data files, uid/prefix resolution, growthplan."""
+"""Tests for module facades, catalog data files, account resolution and growthplan."""
 import io
 import json
 import os
@@ -26,7 +25,7 @@ from helpers_jwt import make_jwt  # noqa: E402
 
 
 class CatalogExternal(unittest.TestCase):
-    """The model tables moved from source to data/*.json."""
+    """Model tables load from plain JSON files under data/."""
 
     def test_tables_load_from_data_dir(self):
         self.assertEqual(len(catalog.STATIC_INTL_MODELS), 24)

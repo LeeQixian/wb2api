@@ -1,5 +1,4 @@
-"""Regression pins for the v1.7.4..v1.7.13 ports.
-Two behaviours: the 413 hint body and the per-request balance estimate."""
+"""Tests for the 413 hint body and the per-request balance estimate."""
 
 import json
 import os

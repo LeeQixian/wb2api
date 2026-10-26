@@ -69,7 +69,7 @@ TEAM_ID_POOL = [
 
 def _pause(seconds=1.0):
     """Sleep 2-7s (uniform), never below the floor.
-    Keeps timing off a machine beat; tests monkeypatch time.sleep."""
+    Random pacing keeps runs off a machine beat; callers may patch time.sleep."""
     return time.sleep(max(float(seconds), random.uniform(2.0, 7.0)))
 
 

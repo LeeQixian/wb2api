@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Drive one web-console (cloud agent) conversation via ACP over HTTP+SSE.
-The agent only runs once a client attaches to the sandbox link and prompts."""
+"""Drive one web-console (cloud agent) conversation via ACP over HTTP+SSE."""
+# The agent only runs once a client attaches to the sandbox link and prompts.
 
 import base64
 import http.client

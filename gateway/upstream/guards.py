@@ -23,7 +23,7 @@ def usage_log_path():
 
 
 def row_outcome(row):
-    """Terminal state of a request row (the hub's analytics helper)."""
+    """Terminal state of a request row."""
     o = row.get("outcome")
     if o:
         return o
@@ -82,7 +82,7 @@ def daily_tokens_by_account(ttl=None):
         if c["day"] == day and c["totals"] is not None and (now - c["at"]) < ttl:
             return dict(c["totals"])
         # A new day keeps the byte offset: everything past it is today's, and
-        # the midnight filter drops whatever old rows are still unread.
+        # the midnight filter drops any unread row from an earlier day.
         totals = dict(c["totals"] or {}) if c["day"] == day else {}
         offset = int(c["offset"] or 0)
         try:

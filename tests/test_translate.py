@@ -1,5 +1,4 @@
-"""Protocol-trap regression tests for gateway.translate.
-Each test pins one upstream behaviour documented by PATCHED-BY-OPS."""
+"""Protocol-trap tests for gateway.translate stream, body and routing helpers."""
 import json
 import sys
 import unittest
@@ -163,7 +162,7 @@ class BodyTranslation(unittest.TestCase):
 
     def test_extra_fields_pass_through(self):
         # build_upstream_body copies the payload; unknown OpenAI-ish fields
-        # ride along to the upstream (source behaviour, pinned here).
+        # ride along to the upstream.
         out = tr.build_upstream_body({"model": "m",
                                       "messages": [{"role": "user", "content": "hi"}],
                                       "web_search_options": {"x": 1}})

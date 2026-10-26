@@ -18,7 +18,7 @@ CUSTOM_TOOL_HINT = (
     "'input' string parameter, verbatim. Do not wrap it in JSON, do not wrap "
     "it in markdown code fences, do not add commentary."
 )
-REJECT_NAMESPACE_TOOLS = False  # keep off: expand+restore is the real fix
+REJECT_NAMESPACE_TOOLS = False  # off: expand plus restore is the supported path
 NAMESPACE_TOOL_MESSAGE = (
     'Unsupported tool type "namespace": this endpoint only supports flat '
     '"function" tools. Resend the tools as individual function entries.'
@@ -86,7 +86,7 @@ def custom_tool_names(tools, _depth=0):
 
 
 def additional_tools_from_input(payload):
-    """Tools carried inside input additional_tools items (Codex 0.162+).
+    """Tools carried inside input additional_tools items.
     Outbound conversion and the return path must read the same merged list."""
     collected = []
     for item in payload.get("input") or []:

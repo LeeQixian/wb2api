@@ -1,15 +1,15 @@
 """Protocol facade: re-exports every gateway.protocol.* symbol as translate.X."""
-import re  # noqa: F401  (kept for callers that reach through this module)
+import re  # noqa: F401  (callers import re from here)
 import sys
 import types
 
 from gateway.protocol import state  # noqa: F401
 from gateway.protocol.state import set_realm, set_system_prompt  # noqa: F401
 from gateway.common.log import log  # noqa: F401
-from gateway import prompt as wb_prompt  # noqa: F401  (test patch point)
+from gateway import prompt as wb_prompt  # noqa: F401  (patch point: translate.wb_prompt)
 
-# Live proxies: reads and writes mirror gateway.protocol.state so that
-# translate.CURRENT_REALM = x keeps working for callers and tests.
+# Live proxies: reads and writes mirror gateway.protocol.state, so
+# `translate.CURRENT_REALM = x` lands on the real state object.
 _PROXY_STATE = ("ACCOUNTS_DIR", "CURRENT_REALM", "DEFAULT_SYSTEM_PROMPT",
                 "SYSTEM_PROMPT", "PROMPT_FILE_OVERRIDE", "_models_cache")
 

@@ -7,7 +7,7 @@ from gateway.common.log import log
 
 def _empty_content(value):
     """True when an assistant message carries no content at all.
-    None / "" / [] all count; a missed [] was the original 11148 case."""
+    None, "", and [] all count; a missed [] triggers upstream 11148."""
     if value is None:
         return True
     if isinstance(value, str):

@@ -1,11 +1,13 @@
-"""Runtime settings: optional API key plus the guard switches (accounts/settings.json).
-No key lets every request through; with one, /v1 routes need the Bearer header."""
+"""Runtime settings from accounts/settings.json: optional API key plus guard switches."""
+
 import hmac
 import json
 import os
 import tempfile
 import threading
 
+# With no api_key every request passes; with one, /v1 routes need the Bearer
+# header.
 SETTINGS_NAME = "settings.json"
 _load_lock = threading.Lock()
 # (path, mtime, size) -> parsed dict; save() invalidates explicitly
@@ -116,7 +118,7 @@ def _set_positive_int(directory, field, value):
 
 def reserve_credits(directory):
     """Global low-credit guard: accounts at or below this balance stay idle.
-    Zero disables the guard, as on installs that predate the setting."""
+    Zero disables the guard."""
     return _positive_int(directory, "reserve_credits")
 
 
@@ -127,7 +129,7 @@ def set_reserve_credits(directory, value):
 
 def daily_token_limit(directory):
     """Global daily guard: an account burning this many tokens stays idle.
-    Zero disables the guard, as on installs that predate the setting."""
+    Zero disables the guard."""
     return _positive_int(directory, "daily_token_limit")
 
 
@@ -184,7 +186,7 @@ def set_local_web_tools(directory, enabled):
 
 def upstream_timeouts(directory):
     """(header, idle) seconds for the chat upstream socket.
-    Defaults 120s/300s; the key layout matches the hub's `upstream` group."""
+    Defaults 120s/300s, read from the `upstream` settings group."""
     cfg = load(directory).get("upstream")
     cfg = cfg if isinstance(cfg, dict) else {}
     header, idle = 120.0, 300.0
@@ -291,7 +293,7 @@ def set_credits_refresh_hours(directory, value):
     return value
 
 
-#: Background schedule hours (CST); identical to the old hardcoded grid.
+#: Background schedule hours in CST.
 DEFAULT_SCHEDULE_HOURS = {
     "checkin": [9, 21],
     "travel": [9, 21],

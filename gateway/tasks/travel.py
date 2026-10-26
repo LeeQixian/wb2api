@@ -64,7 +64,7 @@ def do_cat_travel(account):
     if getattr(account, "is_enterprise", lambda: False)():
         return {"ok": True, "action": "skip", "msg": "企业版账号无成长体系，跳过"}
     headers = account.headers("chat")
-    # 1. Query state
+    # Query the current travel state.
     try:
         st = _travel_status(account)
     except Exception as exc:

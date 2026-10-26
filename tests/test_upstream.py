@@ -1,5 +1,4 @@
-"""Offline tests for gateway.upstream: rotation and throttle semantics.
-A scripted fake pool stands in for the network; open_upstream classifies it."""
+"""Offline tests for gateway.upstream rotation and throttle semantics."""
 import io
 import json
 import os
@@ -281,8 +280,8 @@ class Catalog(unittest.TestCase):
         self.assertNotIn("hy4-preview", both)
 
     def test_stale_free_twin_skipped_in_merge(self):
-        # Bundled snapshot ships hy4-preview-f; the live catalogue now serves
-        # only the paid hy4-preview, so the free twin must not be offered.
+        # Bundled snapshot ships hy4-preview-f while the live catalogue
+        # serves only the paid hy4-preview; the free twin must not be offered.
         entries = dict(up.merge_catalog([("hy4-preview", {"credits": "x0.29"})],
                                         realm="intl"))
         self.assertIn("hy4-preview", entries)

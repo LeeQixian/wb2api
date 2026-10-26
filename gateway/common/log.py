@@ -4,9 +4,8 @@ import threading
 
 _sink = None
 _lock = threading.Lock()
-# A sink may itself call log() (the scheduler used to install its own log as
-# the process sink). Without this guard that re-enters the sink forever, so a
-# nested call goes straight to the stream instead.
+# A sink may itself call log(); without this guard the call re-enters the sink
+# forever, so a nested call goes straight to the stream instead.
 _in_sink = threading.local()
 
 
@@ -17,8 +16,8 @@ def set_logger(fn):
 
 
 def log(msg, level=None, tag=None):
-    """Write one diagnostic line; falls back to stderr before injection.
-    A broken sink or closed stderr must never take a request down."""
+    """Write one diagnostic line; without a sink it uses the local streams.
+    A broken sink or closed stream must never take a request down."""
     sink = _sink
     if sink is not None and not getattr(_in_sink, "active", False):
         _in_sink.active = True

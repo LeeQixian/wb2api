@@ -34,9 +34,8 @@ AFFINITY_DEBUG = os.environ.get("WB_AFFINITY_DEBUG", "0").lower() in (
     "1", "true", "yes", "on")
 
 
-# Optional per-account concurrency cap (account_max_concurrent, 0 = unlimited).
-# Upstream meters tokens per account per minute, so piling conversations onto one
-# account earns a 429 and loses its prefix cache.
+# Per-account concurrency cap (account_max_concurrent, 0 = unlimited); upstream
+# meters tokens per account, so overloading one earns a 429 and loses its cache.
 _ACCOUNT_INFLIGHT = {}
 _ACCOUNT_INFLIGHT_LOCK = threading.Lock()
 ACCOUNT_SLOT_WAIT_MAX = 2.0
@@ -126,7 +125,7 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
     total = max(1, pool.count_ready(realm, model=model)) if pool else 1
     tried = set()
     # A 401 can mean the access token died before its JWT clock did: refresh
-    # once per account per request, then retry that same account (#439).
+    # once per account per request, then retry that same account.
     refreshed_uids = set()
     refresh_uid = None
     last_error = None
@@ -241,13 +240,13 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
         req = urllib.request.Request(chat_url, data=attempt_data, method="POST",
                                      headers=req_headers)
         # Header-name fidelity: Request capitalizes names; the pool sends these
-        # ordered pairs verbatim on the chat wire (#429).
+        # ordered pairs verbatim on the chat wire.
         req.wb_exact_headers = list(req_headers.items())
         try:
             resp = wb_accounts.urlopen(req, timeout=header_timeout,
                                        proxy=account.proxy)
             _apply_stream_idle_timeout(resp, idle_timeout)
-            # a served request clears every account-level penalty
+            # A served request clears every account-level penalty
             # (soft streak, breaker, degrade) along with the model park.
             account.note_success(model=model)
             reset_switch_counter(account, model)
@@ -284,8 +283,8 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
                 account.note_error("HTTP 429 (model throttled)", model=model,
                                    until=reset_at, cooldown=wait)
                 if auto_switch and _try_switch_product(account, model):
-            # A new identity means a new quota line: clear it from `tried`
-            # and drop the model cooldown recorded a moment ago.
+                    # A new identity means a new quota line: clear it from `tried`
+                    # and drop the model cooldown recorded a moment ago.
                     tried.discard(account.uid)
                     try:
                         account.clear_error(model=model)
@@ -308,8 +307,8 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
                 except Exception:
                     detail = ""
                 if restriction_is_account_level(detail):
-                    # Park the restricted account and rotate; the content-
-                    # review passthrough contract stays for every other 403.
+                    # Park the restricted account and rotate; the content-review
+                    # passthrough contract stays for every other 403.
                     account.note_error("HTTP 403 (account restricted)",
                                        cooldown=RESTRICTED_403_COOLDOWN,
                                        single_account=(total <= 1))
@@ -387,7 +386,7 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
         except Exception as exc:
             if retry.is_tls_verify_error(exc):
                 # The chain is the same for every account: one attempt is
-                # enough; retrying only multiplies failed handshakes (#441).
+                # enough; retrying only multiplies failed handshakes.
                 last_error = exc
                 break
             if session_key and pool:

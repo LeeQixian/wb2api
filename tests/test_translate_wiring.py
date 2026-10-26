@@ -1,4 +1,4 @@
-"""Offline tests for gateway.translate runtime wiring (slice-built file)."""
+"""Offline tests for gateway.translate runtime wiring."""
 import json
 import sys
 import unittest
@@ -45,7 +45,7 @@ class EffortAndBans(unittest.TestCase):
         self.assertFalse(tr.is_model_banned("anything"))
 
     def test_ban_tables_empty_by_default(self):
-        # source defaults ship empty: nothing is blocked out of the box
+        # code defaults are empty: nothing is blocked out of the box
         self.assertFalse(tr.ALLOWED_MODELS)
         self.assertEqual(tr.BANNED_SUBSTRING, "")
         self.assertFalse(tr.EXTRA_BANNED)

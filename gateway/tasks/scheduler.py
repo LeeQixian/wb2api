@@ -1,5 +1,6 @@
-"""Background scheduler (off by default, per-day random offsets).
-Times get a persisted +/-15-45 min daily offset; account spacing is 3-10s."""
+"""Background scheduler (off by default, per-day random offsets)."""
+# Each configured hour fires at a persisted +/-15-45 min daily offset;
+# accounts are spaced 3-10s apart.
 import json
 import os
 import random
@@ -183,8 +184,7 @@ class Scheduler:
 
     def _reclaim_loop(self):
         """Sweep live web sessions for turns whose thread never came back.
-        Its own thread: a wedged daily-chat turn parks _run_lock, so a sweep
-        sharing the schedule thread would never run while it is needed."""
+        Runs on its own thread so a parked _run_lock cannot stall the sweep."""
         self._stop_event.wait(WEB_RECLAIM_INTERVAL)
         while not self._stop_event.is_set():
             try:
@@ -345,7 +345,7 @@ class Scheduler:
                         self.log("! 账号 [%s] 每日活跃对话失败: %s"
                                  % (uid8, res.get("error") or res.get("msg")))
                     time.sleep(random.uniform(3.0, 10.0))
-            # 3-10s random spacing between accounts (source used a fixed 1.0s).
+            # 3-10s random spacing between accounts.
             time.sleep(random.uniform(3.0, 10.0))
 
         self.log("巡检完成：Token保活 %d 个，国内签到 %d 个，猫猫日常 %d 个，国际活跃 %d 个"

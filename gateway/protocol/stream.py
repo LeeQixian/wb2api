@@ -36,7 +36,7 @@ def clean_chunk(raw):
     except Exception:
         return raw
     changed = False
-    # a real hit must not be shadowed by zero aliases on the way out
+    # A real cache hit must not be shadowed by zero aliases on the way out.
     if isinstance(obj.get("usage"), dict):
         before = dict(obj["usage"])
         normalize_usage_cache_aliases(obj["usage"])
@@ -74,7 +74,7 @@ def clean_chunk(raw):
 
 
 def _strip_empty_fc(obj):
-    """PATCHED-BY-OPS: recursively drop empty function_call placeholders."""
+    """Recursively drop empty function_call placeholders."""
     changed = False
     if isinstance(obj, dict):
         fc = obj.get("function_call")
@@ -96,7 +96,7 @@ def _strip_empty_fc(obj):
 
 
 def clean_responses_frame(frame):
-    """PATCHED-BY-OPS: clean one Responses SSE frame (bytes).
+    """Clean one Responses SSE frame (bytes).
     Only data: line JSON is rewritten; unparsable frames pass through."""
     if not frame:
         return frame
