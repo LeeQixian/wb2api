@@ -238,10 +238,13 @@ class SchedulerBehaviour(unittest.TestCase):
         s = self._sched(enabled=True)
         before = threading.active_count()
         s.start()
-        self.assertEqual(threading.active_count(), before + 1)
+        # schedule thread plus the web-session reclaim watchdog
+        self.assertEqual(threading.active_count(), before + 2)
         s.stop()
         s._thread.join(timeout=5)
+        s._reclaim_thread.join(timeout=5)
         self.assertFalse(s._thread.is_alive())
+        self.assertFalse(s._reclaim_thread.is_alive())
 
     def test_offsets_in_band_and_persisted(self):
         s = self._sched()
@@ -316,6 +319,31 @@ class WebAgentSetModel(unittest.TestCase):
         c, res = self._run("boom")
         self.assertIn("session/prompt", [m for m, _ in c.requests])
         self.assertFalse(res["ok"])  # no poll_status -> timeout path, but ran on
+
+
+class LogSinkReentry(unittest.TestCase):
+    """A sink that calls log() again must not re-enter itself: the scheduler
+    used to install its own log as the process sink, which recursed ~500 deep
+    and prefixed every line with hundreds of "[调度器]"."""
+
+    def test_sink_calling_log_writes_one_line(self):
+        from gateway.common import log as log_mod
+        seen = []
+
+        def sink(msg, level=None):
+            seen.append(msg)
+            log_mod.log("inner " + msg)
+            return True
+
+        old = log_mod._sink
+        log_mod.set_logger(sink)
+        self.addCleanup(log_mod.set_logger, old)
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            log_mod.log("outer")
+        self.assertEqual(seen, ["outer"])
+        self.assertEqual(out.getvalue(), "[wb2api] inner outer\n")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

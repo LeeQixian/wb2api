@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -235,6 +236,9 @@ class SchedulerKeepsDisabledAlive(unittest.TestCase):
 
         sched = Scheduler(Pool(), enabled=True)
         import gateway.tasks.scheduler as sched_mod
+        # Pin the check-in hour to "now": the cycle only visits accounts for
+        # this leg when the wall clock matches one of its configured hours.
+        sched.checkin_hours = [time.localtime().tm_hour]
         with mock.patch.object(sched, "_load_state"), \
              mock.patch.object(sched, "_ensure_today_offsets"), \
              mock.patch.object(sched_mod, "do_cat_travel",

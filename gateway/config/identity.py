@@ -41,6 +41,11 @@ def _identity_arch():
         machine, machine or "x64")
 
 
+def desktop_chat_compat_enabled():
+    """Opt in to desktop chat headers without changing billing or other products."""
+    return os.environ.get("WB_DESKTOP_CHAT_COMPAT", "").strip() == "1"
+
+
 def cli_stainless_headers():
     """x-stainless-* headers the official CLI's SDK sends."""
     return {
@@ -258,7 +263,16 @@ def build_identity_headers(product, realm, uid, token,
             "X-Conversation-Message-ID": msg_id,
             "X-Request-ID": msg_id,
         }
-        headers.update(trace_headers())
+        compat = desktop_chat_compat_enabled()
+        headers.update(trace_headers(with_parent=compat))
+        if compat:
+            # Desktop profile reported by the panel's headers.go (CN 5.8.3 /
+            # intl 5.8.4); shared SDK values remain configurable. Not a claim
+            # that Python's TLS stack matches the official client.
+            sdk_headers = cli_stainless_headers()
+            # Desktop request timeout is not verified; do not copy CLI's budget.
+            sdk_headers.pop("x-stainless-timeout", None)
+            headers.update(sdk_headers)
     elif product == PRODUCT_VSCODE:
         headers = {
             "X-Agent-Intent": "craft",

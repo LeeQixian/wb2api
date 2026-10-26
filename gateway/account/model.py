@@ -42,6 +42,29 @@ def _auth_failure_text(text):
 #: rewritten from scratch each run; never persisted.
 RUNTIME_ONLY_FIELDS = ("lastError", "cooldownUntil")
 
+
+def _restore_model_windows(raw):
+    """429 windows that have not expired yet survive a restart (hub a6bb76a).
+    Accepts {model: epoch} (what to_dict writes) and a list of rows."""
+    if isinstance(raw, dict):
+        items = raw.items()
+    elif isinstance(raw, list):
+        items = [(row.get("model"), row.get("expiresAt"))
+                 for row in raw if isinstance(row, dict)]
+    else:
+        items = []
+    now = time.time()
+    windows = {}
+    for model, until in items:
+        try:
+            deadline = float(until)
+        except (TypeError, ValueError):
+            continue
+        name = str(model or "").strip()
+        if name and deadline > now:
+            windows[name] = deadline
+    return windows
+
 #: persisted but reset on load (runtime bookkeeping).
 VOLATILE_FIELDS = ("soft_rate_streak", "breaker_fails", "degrade_fails",
                    "model_cooldowns")
@@ -85,8 +108,10 @@ class Account(MaintenanceMixin):
         self.token_expired = not token
         self.cooldown_until = 0.0
         # Per-model cooldowns: upstream 6004 rate limits bind one model, not
-        # the account, so other models keep serving. Runtime-only.
-        self.model_cooldowns = {}
+        # the account, so other models keep serving. Absolute 429 reset
+        # instants are persisted in the credential and re-armed on load;
+        # throttle_wait compares against the clock, so they lapse on their own.
+        self.model_cooldowns = _restore_model_windows(data.get("modelWindows"))
         self.credits = data.get("credits") or None
         self.last_checkin = data.get("lastCheckin") or None
         self.last_daily_chat = data.get("lastDailyChat") or None
@@ -130,8 +155,18 @@ class Account(MaintenanceMixin):
         # Guards the local estimate consume_credit() writes. Separate from
         # _credits_lock, which is held across a network call.
         self._balance_lock = threading.Lock()
+        # Live web sessions this account created: {conversation id: start}.
+        # The turn thread's finally cannot free a session when the thread
+        # itself is wedged in socket land; the scheduler sweeps this ledger.
+        self._web_sessions = {}
+        self._web_sessions_lock = threading.Lock()
 
     def to_dict(self):
+        now = time.time()
+        with self._throttle_lock:
+            windows = {model: int(until)
+                       for model, until in self.model_cooldowns.items()
+                       if until > now}
         return {
             "uid": self.uid,
             "nickname": self.nickname,
@@ -149,6 +184,7 @@ class Account(MaintenanceMixin):
             "enabled": self.enabled,
             "lastError": self.last_error,
             "cooldownUntil": self.cooldown_until,
+            "modelWindows": windows,
             "credits": self.credits,
             "lastCheckin": self.last_checkin,
             "lastDailyChat": self.last_daily_chat,
@@ -412,8 +448,11 @@ class Account(MaintenanceMixin):
             session_key=session_key,
             turn_request_id=turn_request_id,
         )
-        if self.is_cli_identity():
+        if self.is_cli_identity() or (
+                self.product == identity.PRODUCT_DESKTOP
+                and identity.desktop_chat_compat_enabled()):
             # Official CLI chat mimics the OpenAI Node SDK: no browser headers.
+            # Opt-in desktop chat uses the same SDK profile, not the web one.
             headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
@@ -779,9 +818,10 @@ class Account(MaintenanceMixin):
 
     def note_success(self, model=None):
         """A served request clears every account-level penalty."""
+        dropped = False
         with self._throttle_lock:
             if model:
-                self.model_cooldowns.pop(model, None)
+                dropped = self.model_cooldowns.pop(model, None) is not None
             self.soft_streak = 0
             self.unscoped_streak = 0
             self.fails = 0
@@ -793,6 +833,13 @@ class Account(MaintenanceMixin):
             self.last_error = ""
             self.last_error_detail = ""
             self.cooldown_until = 0.0
+            # A credential-shaped 401 parks the account (ready() drops it), but
+            # the token demonstrably works now (hub 392410b): lift it here
+            # instead of waiting for a refresh or a restart.
+            self.token_expired = False
+        if dropped:
+            # Only when a window really existed: this path runs per request.
+            self._persist_model_windows()
 
     def _set_last_error(self, message):
         """Record a refresh error in the account's runtime state."""
@@ -800,6 +847,7 @@ class Account(MaintenanceMixin):
             self.last_error = str(message)[:200]
 
     def note_error(self, message, cooldown=60, single_account=False, model=None, until=None):
+        persist_window = False
         with self._throttle_lock:
             self.last_error = str(message)[:200]
             if _auth_failure_text(message):
@@ -809,9 +857,23 @@ class Account(MaintenanceMixin):
                 wait = max(1.0, float(until) - time.time()) if until else (
                     3.0 if single_account else float(cooldown))
                 self.model_cooldowns[model] = time.time() + wait
-                return
-            actual_cooldown = 3 if single_account else cooldown
-            self.cooldown_until = time.time() + actual_cooldown
+                persist_window = True
+            else:
+                actual_cooldown = 3 if single_account else cooldown
+                self.cooldown_until = time.time() + actual_cooldown
+        if persist_window:
+            # A 429 reset instant outlives the process; without this a restart
+            # both forgets the park and re-serves the exhausted window.
+            self._persist_model_windows()
+
+    def _persist_model_windows(self):
+        """Write the credential now; best-effort, never raises into the caller."""
+        if not self.path:
+            return
+        try:
+            self.save(os.path.dirname(self.path))
+        except Exception as exc:
+            log("account %s: model window save failed: %s" % (self.uid, exc))
 
     def throttle_wait(self, model=None):
         """Seconds until this account can serve `model` again (0 = right now)."""
@@ -827,13 +889,17 @@ class Account(MaintenanceMixin):
         return wait
 
     def clear_error(self, model=None):
+        changed = False
         with self._throttle_lock:
             if model:
-                self.model_cooldowns.pop(model, None)
+                changed = self.model_cooldowns.pop(model, None) is not None
             else:
+                changed = bool(self.model_cooldowns)
                 self.model_cooldowns.clear()
             if self.last_error or self.cooldown_until or self.balance_until:
                 self.last_error = ""
                 self.cooldown_until = 0
                 self.balance_until = 0.0
+        if changed:
+            self._persist_model_windows()
 

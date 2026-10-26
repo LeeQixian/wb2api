@@ -510,20 +510,24 @@ def stream_responses_events(upstream, model, holder):
                             entry["custom"] = True
                     if fn_args:
                         entry["arguments"] += fn_args
-                        if entry.get("custom"):
-                            yield ev("response.custom_tool_call_input.delta", {
-                                "output_index": entry["output_index"],
-                                "item_id": entry["item_id"],
-                                "call_id": entry["id"],
-                                "delta": fn_args,
-                            })
-                        else:
-                            yield ev("response.function_call_arguments.delta", {
-                                "output_index": entry["output_index"],
-                                "item_id": entry["item_id"],
-                                "call_id": entry["id"],
-                                "delta": fn_args,
-                            })
+                # The first chunk may already carry arguments (hub de4d86d).
+                # Emit them after output_item.added like later chunks, without
+                # accumulating them twice: the new-entry branch stored them.
+                if fn_args:
+                    if entry.get("custom"):
+                        yield ev("response.custom_tool_call_input.delta", {
+                            "output_index": entry["output_index"],
+                            "item_id": entry["item_id"],
+                            "call_id": entry["id"],
+                            "delta": fn_args,
+                        })
+                    else:
+                        yield ev("response.function_call_arguments.delta", {
+                            "output_index": entry["output_index"],
+                            "item_id": entry["item_id"],
+                            "call_id": entry["id"],
+                            "delta": fn_args,
+                        })
             piece = delta.get("content")
             if piece:
                 if msg_index is None:

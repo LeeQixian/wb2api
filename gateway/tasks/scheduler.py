@@ -13,6 +13,9 @@ from gateway.tasks.travel import do_cat_travel
 
 STATE_NAME = "scheduler-state.json"
 
+# How often the ledger of live web sessions is swept for wedged turns.
+WEB_RECLAIM_INTERVAL = 60.0
+
 # Lead must exceed the 24h sweep interval, else most expiries are seen late.
 KEEPALIVE_LEAD_DEFAULT_HOURS = 48.0
 KEEPALIVE_LEAD_MIN_HOURS = 1.0
@@ -63,6 +66,7 @@ class Scheduler:
         self.state_dir = state_dir or (pool.dir if pool is not None else None)
         self._stop_event = threading.Event()
         self._thread = None
+        self._reclaim_thread = None
         self.last_run_time = None
         self.next_run_time = None
         self.logs = []
@@ -74,9 +78,6 @@ class Scheduler:
         self._load_state()
         self._reload_schedule()
         self._ensure_today_offsets()
-        # Surface task-level failures (dead endpoints, upstream shape changes)
-        # in the same log.
-        wb_tasks.set_logger(self.log)
 
     # ---------------- logging ----------------
     def log(self, msg, level=None):
@@ -166,14 +167,44 @@ class Scheduler:
     def start(self):
         if self._thread and self._thread.is_alive():
             return
+        self._stop_event.clear()
         if not self.enabled:
             self.log("调度器未启用 (enabled=False)，不启动后台线程；"
                      "wbctl checkin / run_growth_tasks 仍可手动触发")
             return
-        self._stop_event.clear()
+        # Watchdog on its own thread: a wedged daily-chat turn parks _run_lock,
+        # so a sweep sharing the schedule thread would never run when needed.
+        if not self._reclaim_thread or not self._reclaim_thread.is_alive():
+            self._reclaim_thread = threading.Thread(target=self._reclaim_loop, daemon=True)
+            self._reclaim_thread.start()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
         self.log("后台定时调度器已启动")
+
+    def _reclaim_loop(self):
+        """Sweep live web sessions for turns whose thread never came back.
+        Its own thread: a wedged daily-chat turn parks _run_lock, so a sweep
+        sharing the schedule thread would never run while it is needed."""
+        self._stop_event.wait(WEB_RECLAIM_INTERVAL)
+        while not self._stop_event.is_set():
+            try:
+                self.reclaim_web_sessions()
+            except Exception as exc:
+                self.log("网页会话回收异常: %s" % exc)
+            self._stop_event.wait(WEB_RECLAIM_INTERVAL)
+
+    def reclaim_web_sessions(self):
+        """Close abandoned web sessions on every account; returns how many."""
+        total = 0
+        for acc in list(getattr(self.pool, "accounts", None) or []):
+            try:
+                total += acc.reclaim_web_sessions()
+            except Exception as exc:
+                uid8 = (acc.uid or "?")[:8]
+                self.log("账号 [%s] 网页会话回收失败: %s" % (uid8, exc))
+        if total:
+            self.log("网页会话回收：结束 %d 条残留会话" % total)
+        return total
 
     def stop(self):
         self._stop_event.set()
