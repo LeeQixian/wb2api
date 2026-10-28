@@ -126,6 +126,9 @@ class MaintenanceMixin(object):
     def can_daily_chat(self):
         if self.realm != "intl":
             return False
+        # 403 / 11140 is an account-level restriction: stop probing, not just chat.
+        if self.restricted_until > time.time():
+            return False
         if not self.last_daily_chat:
             return True
         today_str = time.strftime("%Y-%m-%d")
@@ -381,6 +384,10 @@ class MaintenanceMixin(object):
         web=None follows settings.json daily_chat_web; upstream is imported lazily."""
         if self.realm != "intl":
             return {"ok": False, "error": "daily chat is only for international accounts"}
+        # A restricted account must not be probed: the daily turn counts as a hit.
+        if self.restricted_until > time.time():
+            return {"ok": False, "skipped": True, "restricted": True,
+                    "error": "account is in an upstream restriction window; skipping"}
         from gateway import upstream as wb_proxy
         url = self.chat_base_url() + wb_proxy.CHAT_PATH
         headers = self.headers("chat")
@@ -433,6 +440,14 @@ class MaintenanceMixin(object):
                 err = exc.read().decode("utf-8", "replace")
             except Exception:
                 err = str(exc)
+            # The daily leg must learn the same 11140 fact as normal dispatch,
+            # or every later slot probes the account again.
+            if exc.code == 403:
+                from gateway.upstream import retry as wb_retry
+                if wb_retry.restriction_is_account_level(err):
+                    self.note_restricted()
+                    return {"ok": False, "restricted": True,
+                            "error": "HTTP 403 / 11140: %s" % err[:100]}
             return {"ok": False, "error": f"HTTP {exc.code}: {err[:100]}"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}

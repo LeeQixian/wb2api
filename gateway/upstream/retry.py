@@ -274,6 +274,30 @@ def exc_detail(exc, limit=180):
     return ("%s: %s" % (type(exc).__name__, text))[:limit] if text else type(exc).__name__
 
 
+AUTH_CHALLENGE_MARK = "www-authenticate: "
+
+
+def auth_challenge(headers):
+    """The 401's `WWW-Authenticate`, collapsed; APISIX names a dead token there."""
+    try:
+        value = headers.get("www-authenticate") if headers else ""
+    except Exception:
+        return ""
+    return " ".join(str(value or "").split())[:160]
+
+
+def http_error_message(exc, detail, limit=None):
+    """`HTTP <code>: <body>`; the challenge goes first so truncation keeps it."""
+    body = str(detail or "")
+    if limit:
+        body = body[:limit]
+    code = getattr(exc, "code", "")
+    challenge = auth_challenge(getattr(exc, "headers", None))
+    if not challenge:
+        return "HTTP %s: %s" % (code, body)
+    return "HTTP %s (%s%s): %s" % (code, AUTH_CHALLENGE_MARK, challenge, body)
+
+
 def parse_rate_limit_reset(detail):
     """Pull the reset time out of an upstream 429 body, if it names one.
     Code 6004 wordings differ per realm, so intl and cn phrases both match."""
@@ -317,6 +341,17 @@ def rate_limit_code(detail):
     except Exception:
         return None
     return obj.get("code") if isinstance(obj, dict) else None
+
+
+CAP_LIMIT_CODE = 6004
+
+
+def rate_limit_is_cap(detail):
+    """True only for the upstream's quota-cap answer (code 6004)."""
+    try:
+        return int(rate_limit_code(detail)) == CAP_LIMIT_CODE
+    except (TypeError, ValueError):
+        return False
 
 
 def rate_limit_is_soft_shape(detail):

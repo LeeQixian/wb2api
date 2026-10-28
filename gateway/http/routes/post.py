@@ -286,9 +286,12 @@ class PostRoutes(object):
                 "local network unavailable: accounts were not penalised; "
                 "check this host's DNS/route/proxy"))
         message = str(exc)
-        record_row({"model": model, "outcome": "error", "status": 502,
+        # Decide the status first: an empty pool is a 503, and the usage row
+        # must say what the client was told.
+        status = 503 if message.startswith("no usable account") else 502
+        record_row({"model": model, "outcome": "error", "status": status,
                     "error": message[:200], "elapsed_ms": wall, "account": account_uid})
-        if message.startswith("no usable account"):
+        if status == 503:
             return self._error(503, message + " - add one with: python3 -m gateway.wbctl login")
         return self._error(502, "upstream unreachable: %s" % message)
 

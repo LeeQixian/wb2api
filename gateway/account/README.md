@@ -35,10 +35,14 @@ helpers resolve to `account/transport.py`.
   releases it early.
 - Backoff: account 429 doubles 10min to 2h; three hard failures trip a 30min to
   6h breaker; five unknown failures degrade 10min to 2h. One success clears all.
-- Only a token-shaped 401 sets `token_expired`; an HTML proxy 401 does not. A
-  served request clears the flag.
+- Only a token-shaped 401 sets `token_expired`; an HTML proxy 401 does not,
+  unless its `WWW-Authenticate` names `invalid_token`. A served request clears
+  the flag.
+- A 403 / `code 11140` restriction persists in `restrictedUntil` and outlives
+  restarts, refreshes and identity switches; only a served request lifts it.
 - Model 429 windows persist as absolute epochs in the credential
-  (`modelWindows`) and lapse against the clock.
+  (`modelWindows`, rows carry `cap` / `capAt` for a 6004 quota cap) and lapse
+  against the clock.
 - `AccountPool.resolve()` accepts a full uid, a unique uid prefix or a unique
   nickname; ambiguity is an error.
 

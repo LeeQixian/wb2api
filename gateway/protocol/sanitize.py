@@ -61,6 +61,12 @@ SANITIZE_DSH_GUI_RE = re.compile(
     r" whose URL the runtime context names\.")
 SANITIZE_DSH_GUI_REPLACEMENT = r"\1 whose URL is named in the runtime context."
 SANITIZE_DSH_GUI_LOWER = "whose url the runtime context names"
+# The file-reference paragraph (@deepseek-ai/dsh-file-reference) hits 11-128 as
+# a whole; one added word breaks the run. The lookahead keeps it idempotent.
+SANITIZE_DSH_FILEREF_RE = re.compile(
+    r"(?i)(Tokens prefixed with @ are paths )(?!that )(the user explicitly referenced\.)")
+SANITIZE_DSH_FILEREF_REPLACEMENT = r"\1that \2"
+SANITIZE_DSH_FILEREF_LOWER = "are paths the user explicitly referenced"
 # Brand shortening: prose spacing only, so paths and identifiers stay intact.
 SANITIZE_BRAND_RE = re.compile(r"DeepSeek[ \t]+Harness", re.IGNORECASE)
 SANITIZE_BRAND_REPLACEMENT = "DeepSeek"
@@ -92,6 +98,9 @@ def has_fingerprint(text, identity=True):
     if (SANITIZE_DSH_GUI_LOWER in low
             and SANITIZE_DSH_GUI_RE.search(text) is not None):
         return True
+    if (SANITIZE_DSH_FILEREF_LOWER in low
+            and SANITIZE_DSH_FILEREF_RE.search(text) is not None):
+        return True
     # The verb phrase is only a cheap prefilter; the regex decides.
     if not any(needle in low for needle in SANITIZE_IDENTITY_VERBS):
         return False
@@ -109,6 +118,7 @@ def sanitize_text(text, identity=True):
     if identity:
         text = SANITIZE_IDENTITY_RE.sub(SANITIZE_IDENTITY_REPLACEMENT, text)
         text = SANITIZE_DSH_GUI_RE.sub(SANITIZE_DSH_GUI_REPLACEMENT, text)
+        text = SANITIZE_DSH_FILEREF_RE.sub(SANITIZE_DSH_FILEREF_REPLACEMENT, text)
         # Brand shortening runs last: the GUI rule still needs the full name.
         text = SANITIZE_BRAND_RE.sub(SANITIZE_BRAND_REPLACEMENT, text)
     for old, new in SANITIZE_REWRITES:

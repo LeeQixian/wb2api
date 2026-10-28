@@ -280,8 +280,9 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
                     log("account %s: unscoped 429, parking '%s' for %.0fs (streak %d)"
                         % (account.uid[:8], model, wait,
                            getattr(account, "unscoped_streak", 0)))
+                capped_at = time.time() if retry.rate_limit_is_cap(detail) else 0.0
                 account.note_error("HTTP 429 (model throttled)", model=model,
-                                   until=reset_at, cooldown=wait)
+                                   until=reset_at, cooldown=wait, cap_at=capped_at)
                 if auto_switch and _try_switch_product(account, model):
                     # A new identity means a new quota line: clear it from `tried`
                     # and drop the model cooldown recorded a moment ago.
@@ -307,11 +308,9 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
                 except Exception:
                     detail = ""
                 if restriction_is_account_level(detail):
-                    # Park the restricted account and rotate; the content-review
-                    # passthrough contract stays for every other 403.
-                    account.note_error("HTTP 403 (account restricted)",
-                                       cooldown=RESTRICTED_403_COOLDOWN,
-                                       single_account=(total <= 1))
+                    # Park it persistently and rotate; every other 403 stays a
+                    # content-review passthrough. No 3s fallback for one account.
+                    account.note_restricted(cooldown=RESTRICTED_403_COOLDOWN)
                     log("account %s restricted by upstream (403 11140), "
                         "cooling %.0fs" % (account.uid[:8],
                                             RESTRICTED_403_COOLDOWN))
@@ -357,7 +356,11 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
                         last_error = exc
                         continue
                 log("account %s rejected (HTTP 401), rotating" % account.uid[:8])
-                account.note_error("HTTP 401",
+                try:
+                    detail = retry.read_http_error(exc, 200).decode("utf-8", "replace")
+                except Exception:
+                    detail = ""
+                account.note_error(retry.http_error_message(exc, detail, 160),
                                    cooldown=60,
                                    single_account=(total <= 1))
                 last_error = exc
@@ -449,7 +452,11 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
         raise last_error
     throttled, wait = realm_model_throttled(realm, model, pool)
     if throttled:
-        raise RateLimited(None, "usage exceeds frequency limit", wait=wait)
+        # Say which model and how long: a bare "frequency limit" invites a retry.
+        reason = ("every usable account in realm '%s' is cooling the upstream "
+                  "%s window; the pool resumes in %ds" % (realm, model, wait))
+        raise RateLimited(None, "usage exceeds frequency limit", wait=wait,
+                          message=reason)
     if busy:
         # Every account is healthy, just serving its cap: say so instead of
         # blaming account state.
@@ -480,6 +487,6 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
             detail = "; accounts: %s" % ", ".join(reasons)
         elif not any(a.enabled and a.access_token for a in pool_accounts):
             detail = "; accounts: all disabled"
-    raise RuntimeError("no usable account for realm '%s': all are disabled, "
-                       "cooling down, expired or parked by the daily token "
-                       "limit%s" % (realm, detail))
+    raise RuntimeError("no usable account for realm '%s': every candidate is "
+                       "disabled, cooling down, expired, out of upstream quota "
+                       "or parked by a local limit%s" % (realm, detail))

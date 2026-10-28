@@ -29,15 +29,32 @@ class GetRoutes(object):
 
 
     def _get_health(self):
-        refresh_pool()
+        pool = refresh_pool()
+        realm = upstream.get_realm()
+        accounts = list(pool.accounts) if pool else []
+        realms = []
+        for account in accounts:
+            if account.realm not in realms:
+                realms.append(account.realm)
         info = {
             "ok": True,
-            "realm": upstream.get_realm(),
-            "accounts": len(_state.POOL.accounts) if _state.POOL else 0,
-            "accounts_ready": _state.POOL.count_ready() if _state.POOL else 0,
+            "realm": realm,
+            "accounts": len(accounts),
+            "accounts_ready": pool.count_ready() if pool else 0,
+            "accounts_by_realm": {r: len([a for a in accounts if a.realm == r])
+                                  for r in realms},
+            "accounts_ready_by_realm": {r: pool.count_ready(realm=r) for r in realms},
+            "accounts_ready_current_realm": pool.count_ready(realm=realm) if pool else 0,
             "api_key_required": bool(settings.get_api_key(_state.ACCOUNTS_DIR)),
         }
-        rep = _state.POOL.representative() if _state.POOL else None
+        # Only per-model cooldowns are known locally; the counts stay read-only.
+        models = sorted({model for a in accounts
+                         for model in (getattr(a, "model_cooldowns", None) or {})})[:50]
+        if models:
+            info["models_ready"] = {
+                model: {r: pool.count_ready(realm=r, model=model) for r in realms}
+                for model in models}
+        rep = pool.representative() if pool else None
         if rep is not None:
             info.update({
                 "uid": rep.uid,

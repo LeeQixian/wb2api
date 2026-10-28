@@ -5,13 +5,14 @@ import os
 import re
 import threading
 import time
+import urllib.error
 
 from gateway.fingerprint import derive_id, generate_request_id, session_id
 from gateway import identity
 from gateway.account.affinity import _human_delta, _human_left
 from gateway.account.backoff import FAIL_WINDOW
 from gateway.account.health import (HealthMixin, auth_failure_text,
-                                    restore_model_windows)
+                                    restore_cap_marks, restore_model_windows)
 from gateway.account.jwt import (GET_RESOURCE_PATH, REFRESH_PATH,
                                  detect_realm_from_token, domain_for_realm,
                                  get_realm_config, jwt_exp, jwt_uid,
@@ -27,6 +28,18 @@ RUNTIME_ONLY_FIELDS = ("lastError", "cooldownUntil")
 #: persisted but reset on load (runtime bookkeeping).
 VOLATILE_FIELDS = ("soft_rate_streak", "breaker_fails", "degrade_fails",
                    "model_cooldowns")
+
+
+def _refresh_failure_message(exc):
+    """Diagnosis string keeping a 401's `WWW-Authenticate`; the body is read here."""
+    if not isinstance(exc, urllib.error.HTTPError):
+        return str(exc)
+    from gateway.upstream import retry as _retry
+    try:
+        body = _retry.read_http_error(exc, 400).decode("utf-8", "replace")
+    except Exception:
+        body = ""
+    return _retry.http_error_message(exc, body, 200)
 
 
 class Account(HealthMixin, ExpiryMixin, MaintenanceMixin):
@@ -69,6 +82,8 @@ class Account(HealthMixin, ExpiryMixin, MaintenanceMixin):
         # Per-model cooldowns: upstream 6004 limits bind one model, not the account.
         # Windows persist as absolute epochs and lapse on their own against the clock.
         self.model_cooldowns = restore_model_windows(data.get("modelWindows"))
+        # 6004 marks (model -> hit moment): says "quota exhausted", not "throttled".
+        self.model_cap_marks = restore_cap_marks(data.get("modelWindows"))
         self.credits = data.get("credits") or None
         self.last_checkin = data.get("lastCheckin") or None
         self.last_daily_chat = data.get("lastDailyChat") or None
@@ -82,6 +97,12 @@ class Account(HealthMixin, ExpiryMixin, MaintenanceMixin):
         # 402 hard park until the next local 04:00, lifted early by a
         # balance refresh that shows credits again. Runtime-only.
         self.balance_until = 0.0
+        # Upstream account-level restriction (403 / 11140): persisted, so it
+        # survives restarts, token refreshes and identity switches.
+        try:
+            self.restricted_until = max(0.0, float(data.get("restrictedUntil") or 0))
+        except (TypeError, ValueError):
+            self.restricted_until = 0.0
         # Prefer accounts whose soonest-expiring credits fall inside this many
         # days, so credits about to lapse get spent first. 0 disables it.
         self.expiring_window_days = 0
@@ -120,9 +141,16 @@ class Account(HealthMixin, ExpiryMixin, MaintenanceMixin):
     def to_dict(self):
         now = time.time()
         with self._throttle_lock:
-            windows = {model: int(until)
-                       for model, until in self.model_cooldowns.items()
-                       if until > now}
+            windows = []
+            for model, until in sorted(self.model_cooldowns.items()):
+                if until <= now:
+                    continue
+                row = {"model": model, "expiresAt": int(until)}
+                cap_at = self.model_cap_marks.get(model)
+                if cap_at:
+                    row["cap"] = True
+                    row["capAt"] = int(cap_at)
+                windows.append(row)
         return {
             "uid": self.uid,
             "nickname": self.nickname,
@@ -140,6 +168,7 @@ class Account(HealthMixin, ExpiryMixin, MaintenanceMixin):
             "enabled": self.enabled,
             "lastError": self.last_error,
             "cooldownUntil": self.cooldown_until,
+            "restrictedUntil": int(self.restricted_until or 0),
             "modelWindows": windows,
             "credits": self.credits,
             "lastCheckin": self.last_checkin,
@@ -151,10 +180,17 @@ class Account(HealthMixin, ExpiryMixin, MaintenanceMixin):
         with self._throttle_lock:
             error = self.last_error
             deadline = self.cooldown_until
-            active = [(model, until) for model, until in self.model_cooldowns.items()
+            active = [(model, until, self.model_cap_marks.get(model))
+                      for model, until in self.model_cooldowns.items()
                       if until > now]
-        active.sort(key=lambda pair: (pair[1], pair[0]))
-        models = [{"model": model, "expiresAt": int(until)} for model, until in active]
+        active.sort(key=lambda row: (row[1], row[0]))
+        models = []
+        for model, until, cap_at in active:
+            row = {"model": model, "expiresAt": int(until)}
+            if cap_at:
+                row["cap"] = True
+                row["capAt"] = int(cap_at)
+            models.append(row)
         return error, deadline, models
 
     def model_cooldowns_snapshot(self):
@@ -334,6 +370,7 @@ class Account(HealthMixin, ExpiryMixin, MaintenanceMixin):
         penalties = [("breaker", self.breaker_until),
                      ("degraded", self.degrade_until),
                      ("balance park", self.balance_until),
+                     ("upstream restriction", self.restricted_until),
                      ("soft-rate cooldown", self.cooldown_until)]
         if model:
             penalties.append(("cooldown for model %s" % model,
@@ -473,11 +510,13 @@ class Account(HealthMixin, ExpiryMixin, MaintenanceMixin):
             payload = _transport.http_json(url, data=b"{}", method="POST", headers=headers, timeout=30,
                                 proxy=self.proxy)
         except Exception as exc:
-            if auth_failure_text(exc):
+            message = _refresh_failure_message(exc)
+            if auth_failure_text(message):
                 self.token_expired = True
-                self._set_last_error("refresh rejected (401); sign in again")
+                self._set_last_error("refresh rejected (401); sign in again - %s"
+                                     % message)
             else:
-                self._set_last_error("refresh failed: %s" % exc)
+                self._set_last_error("refresh failed: %s" % message)
             return False
         data = (payload.get("data") or {})
         data = data.get("data") or data

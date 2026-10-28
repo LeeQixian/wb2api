@@ -11,12 +11,14 @@ from gateway.common.log import log
 
 
 def auth_failure_text(text):
-    """True for a credential-shaped 401, not an HTML proxy page."""
+    """Credential-shaped 401, not an HTML proxy page; `invalid_token` wins."""
     lower = str(text or "").lower()
+    if "invalid_token" in lower or "invalid-token" in lower:
+        return True
     if "<html" in lower:
         return False
     return ("401" in lower or "unauthorized" in lower or "authorization" in lower
-            or "token expired" in lower or "invalid_token" in lower)
+            or "token expired" in lower)
 
 
 def restore_model_windows(raw):
@@ -39,6 +41,25 @@ def restore_model_windows(raw):
         if name and deadline > now:
             windows[name] = deadline
     return windows
+
+
+def restore_cap_marks(raw):
+    """Cap moments (model -> epoch) carried by the same window rows, or {}."""
+    rows = raw if isinstance(raw, list) else []
+    marks = {}
+    now = time.time()
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("cap"):
+            continue
+        try:
+            moment = float(row.get("capAt") or 0.0)
+            deadline = float(row.get("expiresAt") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        name = str(row.get("model") or "").strip()
+        if name and moment and deadline > now:
+            marks[name] = moment
+    return marks
 
 
 class HealthMixin(object):
@@ -131,10 +152,15 @@ class HealthMixin(object):
 
     def note_success(self, model=None):
         """Clear every account-level penalty after a served request."""
-        dropped = False
+        changed = False
         with self._throttle_lock:
             if model:
-                dropped = self.model_cooldowns.pop(model, None) is not None
+                changed = self.model_cooldowns.pop(model, None) is not None
+                self.model_cap_marks.pop(model, None)
+            if self.restricted_until:
+                # A served request is the only proof the vendor lifted it.
+                self.restricted_until = 0.0
+                changed = True
             self.soft_streak = 0
             self.unscoped_streak = 0
             self.fails = 0
@@ -147,15 +173,31 @@ class HealthMixin(object):
             self.last_error_detail = ""
             self.cooldown_until = 0.0
             self.token_expired = False
-        if dropped:
-            self._persist_model_windows()
+        if changed:
+            self._persist_state()
+
+    def note_restricted(self, cooldown=None):
+        """Upstream account-level restriction (403/11140): park it, persisted."""
+        if cooldown is None:
+            from gateway.upstream.retry import RESTRICTED_403_COOLDOWN
+            cooldown = RESTRICTED_403_COOLDOWN
+        now = time.time()
+        with self._throttle_lock:
+            self.last_error = "HTTP 403 (account restricted)"
+            # Only the first strike starts the clock: retries must not extend it.
+            if self.restricted_until <= now:
+                self.restricted_until = now + max(1.0, float(cooldown))
+            until = self.restricted_until
+        self._persist_state()
+        return until
 
     def _set_last_error(self, message):
         """Record a refresh error in the account's runtime state."""
         with self._throttle_lock:
             self.last_error = str(message)[:200]
 
-    def note_error(self, message, cooldown=60, single_account=False, model=None, until=None):
+    def note_error(self, message, cooldown=60, single_account=False, model=None,
+                   until=None, cap_at=0.0):
         """Park the account, or only `model` when the limit is model-scoped."""
         persist_window = False
         with self._throttle_lock:
@@ -166,14 +208,17 @@ class HealthMixin(object):
                 wait = max(1.0, float(until) - time.time()) if until else (
                     3.0 if single_account else float(cooldown))
                 self.model_cooldowns[model] = time.time() + wait
+                if cap_at:
+                    # Upstream said quota exhausted (6004), not a short throttle.
+                    self.model_cap_marks[model] = float(cap_at)
                 persist_window = True
             else:
                 actual_cooldown = 3 if single_account else cooldown
                 self.cooldown_until = time.time() + actual_cooldown
         if persist_window:
-            self._persist_model_windows()
+            self._persist_state()
 
-    def _persist_model_windows(self):
+    def _persist_state(self):
         """Write the credential now; never raises into the caller."""
         if not self.path:
             return
@@ -190,7 +235,7 @@ class HealthMixin(object):
         with self._throttle_lock:
             wait = max(0.0, self.cooldown_until - now,
                        self.balance_until - now, self.breaker_until - now,
-                       self.degrade_until - now)
+                       self.degrade_until - now, self.restricted_until - now)
             if model:
                 wait = max(wait, max(0.0, self.model_cooldowns.get(model, 0.0) - now))
         return wait
@@ -201,12 +246,15 @@ class HealthMixin(object):
         with self._throttle_lock:
             if model:
                 changed = self.model_cooldowns.pop(model, None) is not None
+                self.model_cap_marks.pop(model, None)
             else:
                 changed = bool(self.model_cooldowns)
                 self.model_cooldowns.clear()
+                self.model_cap_marks.clear()
             if self.last_error or self.cooldown_until or self.balance_until:
                 self.last_error = ""
                 self.cooldown_until = 0
                 self.balance_until = 0.0
+            # restricted_until stays: it is the vendor's mark, not our cooldown.
         if changed:
-            self._persist_model_windows()
+            self._persist_state()

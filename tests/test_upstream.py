@@ -32,6 +32,7 @@ class FakeAccount:
         self.model_cooldowns = {}
         self.cooldown_until = 0.0
         self.balance_until = 0.0
+        self.restricted_until = 0.0
         self.soft_streak = 0
         self.fails = 0
         self.degrade_count = 0
@@ -51,8 +52,12 @@ class FakeAccount:
     def chat_base_url(self):
         return "http://fake-upstream.invalid"
 
-    def note_error(self, msg, cooldown=60, single_account=False, model=None, until=None):
+    def note_error(self, msg, cooldown=60, single_account=False, model=None,
+                   until=None, cap_at=0.0):
         self.errors.append({"msg": msg, "model": model, "until": until})
+        if model and cap_at:
+            self.model_cap_marks = getattr(self, "model_cap_marks", {})
+            self.model_cap_marks[model] = cap_at
         if model and until:
             self.model_cooldowns[model] = until
         elif not model:
@@ -100,9 +105,18 @@ class FakeAccount:
         if model:
             self.model_cooldowns.pop(model, None)
 
+    def note_restricted(self, cooldown=None):
+        now = time.time()
+        if self.restricted_until <= now:
+            self.restricted_until = now + float(cooldown or 7200)
+        self.errors.append({"msg": "restricted", "model": None,
+                            "until": self.restricted_until})
+        return self.restricted_until
+
     def throttle_wait(self, model=None):
         return max(0.0, self.cooldown_until - time.time(),
                    self.balance_until - time.time(),
+                   self.restricted_until - time.time(),
                    self.model_cooldowns.get(model, 0.0) - time.time())
 
     def set_product(self, value):

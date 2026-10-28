@@ -134,7 +134,7 @@ class Restricted403(unittest.TestCase):
                            "msg": "restricted due to unusual activity"}).encode()
         resp, acct = self.open_with(FakePool([a, b]), [http_error(403, body), b"ok"])
         self.assertEqual(acct.uid, "u2")
-        self.assertGreater(a.cooldown_until, time.time() + 7000)
+        self.assertGreater(a.restricted_until, time.time() + 7000)
 
     def test_content_review_403_still_passes_through(self):
         # local contract: content review keeps the passthrough path (no DegradeGate)

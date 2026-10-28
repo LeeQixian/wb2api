@@ -31,7 +31,7 @@ export OPENAI_API_KEY=***
 
 | 路由 | 鉴权 | 说明 |
 |---|---|---|
-| `GET /health` | 免 | 存活探针与池状态 |
+| `GET /health` | 免 | 存活探针与池状态：`accounts_by_realm`、`accounts_ready_by_realm`、`accounts_ready_current_realm`、`models_ready` |
 | `GET /realm` | 免 | 当前默认出口 |
 | `POST /realm` | key | 切换默认出口（`intl` / `cn`），落盘 |
 | `GET /v1/models` | 免 | 双出口全量模型，带 `cn:` / `global:` 别名 |
@@ -108,7 +108,11 @@ CORS 默认关，`--cors` 打开。
   至次日本地 04:00，余额恢复提前解冻。连击计数受 `WB_FAIL_WINDOW`（默认 600 秒）
   时间窗约束，超窗从第一档重算。
 - 模型级 429 的重置时刻写入账号 JSON（`modelWindows`），重启后未到期的冷却继续生效；
-  到点自动放行，成功请求即时清除。
+  到点自动放行，成功请求即时清除。上游 `code 6004`（额度用满）的窗口额外带
+  `cap` / `capAt`，与临时限流区分。
+- 上游 `403 / code 11140`（账号级风控）写入 `restrictedUntil` 并停用该号 2 小时，
+  重启与换身分都不清除；日活打卡同样跳过限制窗口内的账号，只有真被上游服务成功
+  的一次请求才解除。
 - 国际版日活网页会话登记在进程内（上限 128 条）；收尾失败或线程卡死时，调度器每
   60 秒代为关闭，避免占满上游 10 个活跃名额。
 - `enable` / `disable` 只影响推理派单；`--tasks` 的保活、签到、旅行对每个能跑通的

@@ -5,6 +5,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -83,7 +84,10 @@ class ServerCase(unittest.TestCase):
         self.accounts = os.path.join(self.tmp.name, "accounts")
         self.usage = os.path.join(self.tmp.name, "usage")
         os.makedirs(self.accounts)
-        # server.py reads module-level ACCOUNTS_DIR/USAGE_DIR at call time.
+        # srv.* assignments forward to the state module, which is what the
+        # handlers read; restore them so no test leaves a deleted tmpdir behind.
+        self._saved = {"ACCOUNTS_DIR": srv._state.ACCOUNTS_DIR,
+                       "USAGE_DIR": srv._state.USAGE_DIR}
         srv.ACCOUNTS_DIR = self.accounts
         srv.USAGE_DIR = self.usage
         srv.POOL = FakePool()
@@ -91,7 +95,6 @@ class ServerCase(unittest.TestCase):
         self.calls = []
         self.realms = []
         self.open_result = ("ok", None)
-        self._saved = {k: getattr(srv, k) for k in ("ARGS",)}
         srv.ARGS = srv._parse_args([])
         self._patch("check_key", lambda d, s: True)
         self._patch_upstream("open_upstream", self._fake_open)
@@ -119,6 +122,8 @@ class ServerCase(unittest.TestCase):
         self.httpd.shutdown()
         self.httpd.server_close()
         self.thread.join(timeout=5)
+        for name, value in self._saved.items():
+            setattr(srv._state, name, value)
         for name, (target, original) in reversed(self._patches):
             setattr(target, name, original)
         self._patches = []
@@ -162,6 +167,30 @@ class ServerCase(unittest.TestCase):
         if err is not None:
             raise err
         return FakeResponse(), FakeAccount()
+
+
+class TestHealthReadiness(ServerCase):
+    """A pool empty for one model must not read as all-green (v1.9.0 #667)."""
+
+    def test_counts_split_by_realm_and_model(self):
+        from gateway.account.model import Account
+        from gateway.account.pool import AccountPool
+        pool = AccountPool(self.accounts, log=lambda msg: None)
+        cn = Account({"uid": "cn-1", "accessToken": "x.y.z", "realm": "cn"})
+        intl = Account({"uid": "intl-1", "accessToken": "x.y.z", "realm": "intl"})
+        cn.model_cooldowns["hy3"] = time.time() + 600
+        pool.accounts = [cn, intl]
+        pool.loaded_at = time.time()   # refresh_pool must not reload from disk
+        srv.POOL = pool
+
+        status, raw = self._request("/health")
+        info = json.loads(raw)
+        self.assertEqual(status, 200)
+        self.assertEqual(info["accounts_by_realm"], {"cn": 1, "intl": 1})
+        self.assertEqual(info["accounts_ready"], 2)
+        self.assertEqual(info["accounts_ready_by_realm"], {"cn": 1, "intl": 1})
+        self.assertEqual(info["accounts_ready_current_realm"], 1)
+        self.assertEqual(info["models_ready"], {"hy3": {"cn": 0, "intl": 1}})
 
 
 class TestFreeRoutes(ServerCase):
@@ -351,6 +380,11 @@ class TestRealmGuards(ServerCase):
         status, raw = self._post_chat()
         self.assertEqual(status, 503)
         self.assertIn("wbctl login", json.loads(raw)["error"]["message"])
+        # The usage row must carry the status the client saw, not a flat 502.
+        with open(os.path.join(srv._state.USAGE_DIR, "usage.jsonl"),
+                  encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh]
+        self.assertEqual(rows[-1]["status"], 503)
 
     def test_http_error_maps_status(self):
         req = urllib.request.Request("https://x/y", data=b"")
