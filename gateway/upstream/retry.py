@@ -219,13 +219,24 @@ def http_error_detail(exc, limit=600):
     return raw.decode("utf-8", "replace")
 
 
+def cache_http_error_body_enabled():
+    """Opt-in WB_CACHE_HTTP_ERROR_BODY: keep the first error-body read for
+    later readers; a second read of the same HTTPError would otherwise see an
+    exhausted stream and come back empty."""
+    raw = os.environ.get("WB_CACHE_HTTP_ERROR_BODY", "")
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
 def read_http_error(exc, limit=600):
     """The body cached by http_error_detail, or a fresh read."""
     raw = getattr(exc, "wb_body", None)
     if raw is not None:
         return raw[:limit]
     try:
-        return exc.read(limit)
+        raw = exc.read(limit)
+        if cache_http_error_body_enabled():
+            exc.wb_body = raw
+        return raw
     except Exception:
         return b""
 

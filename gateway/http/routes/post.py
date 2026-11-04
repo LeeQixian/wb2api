@@ -6,6 +6,7 @@ import urllib.error
 from urllib.parse import urlparse
 
 from gateway import settings, translate, upstream, webtools as wb_webtools
+from gateway.protocol.stream import stop_at_sse_done_enabled
 from gateway.upstream import retry
 from gateway.common.log import log
 from gateway.http import state as _state
@@ -320,7 +321,11 @@ class PostRoutes(object):
             with heartbeat:
                 for line in translate.iter_sse_lines(upstream_resp):
                     data = translate.strip_data_prefix(line.decode("utf-8", "replace"))
-                    if not data or data == "[DONE]" or data.startswith(":"):
+                    if data == "[DONE]":
+                        if stop_at_sse_done_enabled():
+                            break
+                        continue
+                    if not data or data.startswith(":"):
                         continue
                     maybe = None
                     try:

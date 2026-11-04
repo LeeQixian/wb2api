@@ -5,12 +5,40 @@
 
 | 项 | 值 |
 |---|---|
-| 同步到 | `a6a967e` release: v1.9.0 |
+| 同步到 | `077fb2f` release: v1.10.9（自 v1.9.1 起为选择性同步，见下） |
 | 分叉点 | `650b659` release: v1.5.4（首次瘦身移植的基线） |
-| 已跟进区间 | v1.5.5 → v1.9.0 |
+| 已跟进区间 | v1.5.5 → v1.10.9 |
 
 同步口径：只跟进已发布的 tag，tag 之后的主干不读。上游 bug 修复照搬；上游新增
 功能加开关且默认关；与「本地独有改动」冲突的一律以本地为准。
+
+## v1.9.1 → v1.10.9 选择性同步（145 commits 中取 9 个）
+
+已取：
+
+| commit | 内容 |
+|---|---|
+| `b04868e` | `normalize_tools` 丢弃上游不接受的名字（400/11133） |
+| `ef479f7` | 嵌套 namespace 保留父路径；`resolve_namespaced_name` 用 `rfind`；Responses `tool_choice` 回写裸名 |
+| `ecb95a6`（仅 sanitize 部分） | Codex 自述首段整句中性化，删掉反向注入指纹的旧改写规则 |
+| `0ed5386` | 429 附 `X-RateLimit-Reset` / `-At` 头与正文 `reset_at`；废弃值回落本地窗口 |
+| `97df705` | `WB_CACHE_HTTP_ERROR_BODY`：错误正文首次读取后复用，默认关 |
+| `1bf70e5` | `WB_STOP_AT_SSE_DONE`：读到 `[DONE]` 即停，默认关 |
+| `53c8697` | `usage.jsonl` 改单次 `os.write` 原子追加（本地无 msvcrt 分支，仅 POSIX） |
+| `b700692` | 日限折叠 offset 加 size/dev/inode + 64 字节尾签名校验 |
+| `42dbc90` | 国际版 `deepseek-v4.1-flash` 计费 `x0.00` → `x0.11` |
+
+未取（同区间，按废弃清单或与本地契约冲突）：
+
+- `ecb95a6` 的 proxy_slot / proxy_exit 归因：依赖代理槽基建，本地没有。
+- `0ed5386` 的整池最短窗口口径：本地每出口单号，`retry_after_seconds` 已是同一窗口。
+- `25b60cc` 请求体上限面板可调与 413 断连：依赖 `wb_settings` 面板接口，本地
+  `WB_MAX_PAYLOAD_BYTES` 已覆盖。
+- `39d6a76` 国内版 flash 免费误标：本地国内目录已是 `x0.11`，且无免费回退族。
+- `dfe378d` 国际版计费快照大改（3800 行）：随下次目录全量同步再对，本次只改 flash。
+- `937c179` 成长中心任务扩充、`769b74e`/媒体系列（`#728`）、CodeArts 第三出口全套、
+  dashboard/登录槽/代理槽、`47c6728` OpenWrt 入口、`7fe04ad` 诊断脚本。
+- `4df31cf`（Claude Code intro 消毒）在 v1.10.9 之后的主干，按口径未读。
 
 ## 直接废弃的功能（上游有，本项目永远不做）
 

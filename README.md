@@ -101,12 +101,17 @@ CORS 默认关，`--cors` 打开。
 | `WB_PRESERVE_REQUEST_CONTRACT=1` | 客户端数据原样透传，不做消毒与字段映射 |
 | `WB_DESKTOP_CHAT_COMPAT=1` | 桌面身份 chat 改用 CLI/SDK 头族，默认关 |
 | `WB_MAX_PAYLOAD_BYTES` | 请求体上限，默认 16MB |
+| `WB_STOP_AT_SSE_DONE=1` | 上游流读到 `[DONE]` 即停止，不等 EOF，默认关 |
+| `WB_CACHE_HTTP_ERROR_BODY=1` | 首次读取的错误正文留在异常上供后读复用，默认关 |
 
 ## 行为要点
 
 - 429 指数退避 10 分钟到 2 小时；连续硬失败熔断 30 分钟到 6 小时；402 余额不足停放
   至次日本地 04:00，余额恢复提前解冻。连击计数受 `WB_FAIL_WINDOW`（默认 600 秒）
   时间窗约束，超窗从第一档重算。
+- 429 响应同时给出绝对恢复时刻：`Retry-After`（秒）之外还有 `X-RateLimit-Reset`
+  （epoch 秒）、`X-RateLimit-Reset-At`（ISO-8601 UTC）与正文里的 `reset_at`。时刻
+  就是派单用的那个窗口结束点，过去或越界的值一律丢弃回落到本地换算。
 - 模型级 429 的重置时刻写入账号 JSON（`modelWindows`），重启后未到期的冷却继续生效；
   到点自动放行，成功请求即时清除。上游 `code 6004`（额度用满）的窗口额外带
   `cap` / `capAt`，与临时限流区分。

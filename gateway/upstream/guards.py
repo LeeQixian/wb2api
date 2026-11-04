@@ -13,13 +13,53 @@ from gateway.common import paths
 
 
 from gateway.upstream import state as _state
-_daily_usage = {"day": "", "totals": None, "offset": 0, "at": 0.0}
+_daily_usage = {"day": "", "totals": None, "offset": 0, "at": 0.0,
+                # (size, dev, inode) of the log the cached offset was taken
+                # against, plus the 64 bytes just before it. Without these a
+                # rewritten-then-regrown log (copytruncate) looks like a plain
+                # append and the fold both keeps deleted rows and skips the
+                # new file's first `offset` bytes.
+                "key": None, "tail": None}
 _daily_usage_lock = threading.Lock()
 _STATS_TTL = float(os.environ.get("WB_STATS_TTL", 15))
 
 
 def usage_log_path():
     return os.path.join(_state.USAGE_DIR, "usage.jsonl")
+
+
+# How many bytes of the already-counted prefix are read back on every refresh
+# to prove that prefix still holds the same bytes.
+_TAIL_SIGNATURE = 64
+
+
+def _usage_log_key():
+    """(size, device, inode) of the usage log, or a zero key when it is gone."""
+    try:
+        info = os.stat(usage_log_path())
+        return (info.st_size, info.st_dev, info.st_ino)
+    except OSError:
+        return (0, 0, 0)
+
+
+def _log_offset_holds(previous, current, offset):
+    """True when `offset` still sits inside the file `previous` described."""
+    return (previous is not None
+            and previous[1] == current[1] and previous[2] == current[2]
+            and current[0] >= offset)
+
+
+def _log_tail_signature(offset):
+    """The last bytes before `offset`, or None when they cannot be read."""
+    if offset <= 0:
+        return b""
+    try:
+        with open(usage_log_path(), "rb") as fh:
+            start = max(0, offset - _TAIL_SIGNATURE)
+            fh.seek(start)
+            return fh.read(offset - start)
+    except OSError:
+        return None
 
 
 def row_outcome(row):
@@ -85,20 +125,33 @@ def daily_tokens_by_account(ttl=None):
         # the midnight filter drops any unread row from an earlier day.
         totals = dict(c["totals"] or {}) if c["day"] == day else {}
         offset = int(c["offset"] or 0)
-        try:
-            size = os.path.getsize(usage_log_path())
-        except OSError:
-            size = 0
-        if offset > size:
+        log_key = _usage_log_key()
+        # Resume the cached fold only when the bytes it counted are provably
+        # still there. `offset > size` alone misses the case that actually
+        # bites: logrotate's copytruncate empties the file in place (same
+        # inode) and it then grows past the old offset, so the size test
+        # passes while the bytes underneath were replaced. The daily counters
+        # would then keep yesterday's numbers *and* silently skip every row in
+        # the first `offset` bytes of today's file. The key covers
+        # size/device/inode; re-reading the seam is what tells an append apart
+        # from a rewrite.
+        if offset and not (c.get("key") is not None
+                           and c.get("tail") is not None
+                           and _log_offset_holds(c["key"], log_key, offset)
+                           and _log_tail_signature(offset) == c["tail"]):
             totals, offset = {}, 0
         try:
             totals, offset = _scan_daily_tokens(offset, totals)
         except Exception as exc:
             log("daily token scan failed: %s" % exc)
             _daily_usage.update({"day": day, "totals": None, "offset": 0,
-                                 "at": time.time()})
+                                 "key": None, "tail": None, "at": time.time()})
             return None
+        # Record the position consumed *and* the seam behind it, so the next
+        # call can prove this prefix still holds the same bytes.
         _daily_usage.update({"day": day, "totals": totals, "offset": offset,
+                             "key": _usage_log_key(),
+                             "tail": _log_tail_signature(offset),
                              "at": time.time()})
         return dict(totals)
 

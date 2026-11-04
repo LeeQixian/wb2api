@@ -25,14 +25,21 @@ SANITIZE_FEATURES = (
 SANITIZE_REWRITES = (
     ("You are Claude Code, Anthropic's official CLI for Claude",
      "You are Claude Code, Anthropic's official CLI tool for Claude"),
-    ("Main branch (you will usually use this for PRs)",
+    ("Default branch (you will usually use this for PRs)",
      "Default branch (you will usually use this for PRs)"),
-    ("You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
-     "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant."),
-    ("To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
+    ("To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
      "To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues"),
     ("11128", "11-128"),
 )
+# Codex CLI self-introduction (#743): the upstream flags the sentence
+# "identity self-description + Codex CLI" as 11-128. The old rewrite rule turned
+# a neutral sentence INTO that self-description, i.e. injected the fingerprint
+# into the outbound body; neutralize the whole sentence instead, so the result
+# no longer matches has_fingerprint().
+SANITIZE_CODEX_INTRO_RE = re.compile(
+    r"(?i)You are a coding agent running in the Codex CLI(?: tool)?"
+    r"[^.\n]*\.")
+SANITIZE_CODEX_INTRO_REPLACEMENT = "You are a helpful AI assistant."
 SANITIZE_HDR_RE = re.compile(r"(?i)x-anthropic-billing-header:[^;\r\n]*;?\s*")
 SANITIZE_BARE_HDR_RE = re.compile(r"(?i)x-anthropic-billing-header")
 SANITIZE_KV_RE = re.compile(r"(?i)\bcc_[a-z0-9_]+=[^;\r\n]*;?\s*")
@@ -116,6 +123,9 @@ def sanitize_text(text, identity=True):
     # the confirmed contiguous fingerprint is neutralized.
     text = SANITIZE_OMO_JUNIOR_RE.sub("Sisyphus-Junior - Focused executor", text)
     if identity:
+        # The Codex self-intro sentence goes first: it is itself one of the
+        # SANITIZE_FEATURES fingerprints.
+        text = SANITIZE_CODEX_INTRO_RE.sub(SANITIZE_CODEX_INTRO_REPLACEMENT, text)
         text = SANITIZE_IDENTITY_RE.sub(SANITIZE_IDENTITY_REPLACEMENT, text)
         text = SANITIZE_DSH_GUI_RE.sub(SANITIZE_DSH_GUI_REPLACEMENT, text)
         text = SANITIZE_DSH_FILEREF_RE.sub(SANITIZE_DSH_FILEREF_REPLACEMENT, text)

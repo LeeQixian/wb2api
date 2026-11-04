@@ -3,6 +3,7 @@
 
 import http.client
 import json
+import os
 import threading
 import time
 import uuid
@@ -14,6 +15,14 @@ from gateway.protocol.repair import is_truncated_arguments
 from gateway.protocol.request import estimate_tokens
 
 NOISE_KEYS = ("extra_fields", "refusal", "reasoning_content")
+
+
+def stop_at_sse_done_enabled():
+    """Opt-in WB_STOP_AT_SSE_DONE: stop reading the upstream stream at its
+    terminal [DONE] marker instead of waiting for EOF. Off by default, so the
+    existing behavior is preserved."""
+    raw = os.environ.get("WB_STOP_AT_SSE_DONE", "")
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
 def strip_data_prefix(line):
@@ -231,9 +240,12 @@ def aggregate_stream(raw_iter, model, resp_id):
     saw_done = False
     for line in raw_iter:
         data = strip_data_prefix(line.decode("utf-8", "replace"))
-        if not data or data == "[DONE]":
-            if data == "[DONE]":
-                saw_done = True
+        if data == "[DONE]":
+            saw_done = True
+            if stop_at_sse_done_enabled():
+                break
+            continue
+        if not data:
             continue
         try:
             chunk = json.loads(data)

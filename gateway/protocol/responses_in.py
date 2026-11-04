@@ -9,7 +9,8 @@ from gateway.common.log import log
 from gateway.protocol.model_info import model_default_max_output_tokens
 from gateway.protocol.request import local_web_tools_enabled
 from gateway.protocol.sanitize import preserve_request_contract_enabled
-from gateway.protocol.tools import (additional_tools_from_input, expand_namespace_tools, _tools_for_chat)
+from gateway.protocol.tools import (additional_tools_from_input, expand_namespace_tools,
+                                    resolve_namespaced_name, _tools_for_chat)
 
 
 def _flatten_content(content):
@@ -399,7 +400,15 @@ def responses_to_chat(payload, compaction=False):
             chat["tools"] = wb_webtools.install_tool_defs(chat.get("tools") or [], wants)
             chat["_web_tools"] = True
     if payload.get("tool_choice") and not compaction:
-        chat["tool_choice"] = payload["tool_choice"]
+        tc = payload["tool_choice"]
+        if isinstance(tc, dict) and isinstance(chat.get("_namespace_map"), dict):
+            fn = tc.get("function")
+            if isinstance(fn, dict) and fn.get("name"):
+                bare_name, _ = resolve_namespaced_name(fn["name"], chat["_namespace_map"])
+                tc = dict(tc)
+                tc["function"] = dict(fn)
+                tc["function"]["name"] = bare_name
+        chat["tool_choice"] = tc
     if payload.get("parallel_tool_calls") is not None and not compaction:
         chat["parallel_tool_calls"] = payload["parallel_tool_calls"]
     return chat

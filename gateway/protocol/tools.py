@@ -141,7 +141,8 @@ def expand_namespace_tools(tools, _depth=0):
                 subs = entry.get("functions")
             if not isinstance(subs, list):
                 subs = []
-            child_ns = str(entry.get("name") or ns_name or "")
+            own = str(entry.get("name") or "")
+            child_ns = _NS_SEP.join([p for p in (ns_name, own) if p])
             for sub in subs:
                 collect(sub, depth + 1, child_ns)
             return
@@ -194,10 +195,10 @@ def resolve_namespaced_name(name, mapping):
     if name in mapping:
         return name, mapping[name]
     if "::" in name:
-        idx = name.find("::")
+        idx = name.rfind("::")
         if idx > 0:
             tail = name[idx + 2:]
-            head = name[:idx]
+            head = name[:idx].replace("::", _NS_SEP)
             if tail in mapping:
                 return tail, mapping[tail]
             return tail, head

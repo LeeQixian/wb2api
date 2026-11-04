@@ -12,6 +12,29 @@ from gateway.common.log import log
 from gateway.http import state as _state
 from gateway.http.errors import BadJSON, BodyTooLarge
 
+# 2100-01-01T00:00:00Z. Anything beyond that is a parsing accident, and
+# time.gmtime() would raise on it.
+_RESET_EPOCH_CEILING = 4102444800
+
+
+def _usable_reset_epoch(value, now=None):
+    """Epoch seconds worth handing to a client, or None.
+
+    Three filters reject an instant that would be wrong to act on: non-numeric,
+    already past, and beyond 2100. A stale value must fall back to the local
+    window instead of being "fixed" into the future: inventing a reset time is
+    exactly what an absolute instant is meant to eliminate.
+    """
+    try:
+        epoch = float(value)
+    except (TypeError, ValueError):
+        return None
+    if epoch <= (now if now is not None else time.time()):
+        return None
+    if epoch > _RESET_EPOCH_CEILING:
+        return None
+    return int(epoch)
+
 
 class HTTPBase(object):
     """Shared plumbing; the route mixins build on this."""
@@ -148,6 +171,15 @@ class HTTPBase(object):
 
     def _rate_limited(self, exc):
         wait = max(1, int(getattr(exc, "wait", 60) or 60))
+        # Absolute instant the window reopens: the caller's explicit value when
+        # it has one, otherwise the same window `wait` was derived from. Both
+        # describe one window, so they always agree.
+        reset_at = _usable_reset_epoch(getattr(exc, "reset_at", None))
+        if reset_at is None:
+            reset_at = _usable_reset_epoch(time.time() + wait)
+        reset_iso = ""
+        if reset_at is not None:
+            reset_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(reset_at))
         # A 429 raised without an upstream call carries its own text; the
         # rest keep the upstream wording.
         custom = getattr(exc, "message", "")
@@ -156,20 +188,26 @@ class HTTPBase(object):
         detail = ""
         if exc.detail and not custom:
             detail = " - " + exc.detail[:200]
+        if reset_iso:
+            detail += " (resets at %s)" % reset_iso
         self._handle_expect_continue()
         self._discard_body()
-        body = json.dumps({
-            "error": {
-                "message": text + detail,
-                "type": "rate_limit_error",
-                "code": 429,
-                "retry_after": wait,
-            }
-        }, ensure_ascii=False).encode("utf-8")
+        error = {
+            "message": text + detail,
+            "type": "rate_limit_error",
+            "code": 429,
+            "retry_after": wait,
+        }
+        if reset_at is not None:
+            error["reset_at"] = reset_at
+        body = json.dumps({"error": error}, ensure_ascii=False).encode("utf-8")
         self.send_response(429)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Retry-After", str(wait))
+        if reset_at is not None:
+            self.send_header("X-RateLimit-Reset", str(reset_at))
+            self.send_header("X-RateLimit-Reset-At", reset_iso)
         self._cors()
         self.end_headers()
         self.wfile.write(body)

@@ -22,10 +22,14 @@ class RateLimited(Exception):
     """Upstream throttled this model (429 / code 6004). Distinct from a dead
     pool: the credential is fine, only the model is cooling down for a while."""
 
-    def __init__(self, http_error=None, detail="", wait=60, message=""):
+    def __init__(self, http_error=None, detail="", wait=60, message="", reset_at=None):
         self.http_error = http_error
         self.detail = detail or ""
         self.wait = max(1, int(wait or 60))
+        # Absolute epoch at which the window reopens, when the caller knows it.
+        # None means "derive it from `wait` at the exit" — the retry window the
+        # scheduler itself uses, so the client sees the same instant we do.
+        self.reset_at = reset_at
         # 429s raised without an upstream call (the daily token guard parks
         # the pool) carry their own text.
         self.message = message or ""

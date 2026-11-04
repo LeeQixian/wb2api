@@ -8,7 +8,7 @@ from gateway.common.log import log
 from gateway.protocol import state
 from gateway.protocol.repair import is_truncated_arguments
 from gateway.protocol.request import build_citations, estimate_tokens, web_tools_active
-from gateway.protocol.stream import strip_data_prefix
+from gateway.protocol.stream import stop_at_sse_done_enabled, strip_data_prefix
 from gateway import webtools as wb_webtools
 from gateway.protocol.tools import (DSML_CALLS_RE, apply_namespace_to_calls, parse_dsml_tool_calls, stamp_namespace, _unwrap_custom_input)
 from gateway.protocol.usage import _responses_usage
@@ -422,9 +422,12 @@ def stream_responses_events(upstream, model, holder):
         yield ev("response.in_progress", {"response": resp_obj("in_progress")})
     for raw in upstream:
         data = strip_data_prefix(raw.decode("utf-8", "replace"))
-        if not data or data == "[DONE]":
-            if data == "[DONE]":
-                saw_done = True
+        if data == "[DONE]":
+            saw_done = True
+            if stop_at_sse_done_enabled():
+                break
+            continue
+        if not data:
             continue
         try:
             chunk = json.loads(data)

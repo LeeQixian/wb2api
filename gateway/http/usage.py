@@ -10,6 +10,28 @@ from gateway.common.log import log
 from gateway.http import state as _state
 
 
+_WRITE_LOCK = threading.Lock()
+
+
+def _append_line(path, text):
+    """Append one JSONL row atomically.
+
+    A single os.write() on an O_APPEND descriptor is atomic on POSIX, so two
+    request threads can never interleave halves of a row. The old text-mode
+    `open(..., "a").write()` split one logical write into several syscalls
+    under the buffer, and concurrent writers then silently lost rows (each
+    lost row was also absent from every later fold, with no error raised)."""
+    payload = text.encode("utf-8")
+    with _WRITE_LOCK:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            written = 0
+            while written < len(payload):
+                written += os.write(fd, payload[written:])
+        finally:
+            os.close(fd)
+
+
 def record_row(row):
     """Append one usage line. Errors must never break the served response."""
     try:
@@ -19,8 +41,7 @@ def record_row(row):
         # epoch seconds: the daily-token guard folds usage.jsonl on `at`
         row["at"] = time.time()
         line = json.dumps(row, ensure_ascii=False) + "\n"
-        with open(os.path.join(_state.USAGE_DIR, "usage.jsonl"), "a", encoding="utf-8") as fh:
-            fh.write(line)
+        _append_line(os.path.join(_state.USAGE_DIR, "usage.jsonl"), line)
     except Exception as exc:
         log("usage write failed: %s" % exc, "WARN")
         return
