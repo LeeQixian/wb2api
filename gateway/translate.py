@@ -39,9 +39,9 @@ from gateway.protocol.sanitize import (  # noqa: F401
 )
 from gateway.protocol.repair import (  # noqa: F401
     _empty_content, _merge_reasoning_content, backfill_reasoning_content,
-    cleanup_orphan_tool_calls, drop_truncated_tool_calls,
-    is_truncated_arguments, merge_adjacent_tool_calls, normalize_roles,
-    repack_tool_result_blocks,
+    cleanup_orphan_tool_calls, drop_truncated_tool_calls, guard_empty_text_parts,
+    is_truncated_arguments, merge_adjacent_tool_calls, mirror_upstream_reasoning,
+    normalize_roles, repack_tool_result_blocks,
 )
 from gateway.protocol.model_info import (  # noqa: F401
     ALLOWED_MODELS, ALLOWED_PREFIXES, BANNED_SUBSTRING, CN_EXCLUSIVE,

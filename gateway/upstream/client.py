@@ -34,6 +34,41 @@ AFFINITY_DEBUG = os.environ.get("WB_AFFINITY_DEBUG", "0").lower() in (
     "1", "true", "yes", "on")
 
 
+# Intl exit model ids: the base id stops working once the account's base
+# bucket is empty (upstream code 6004), while the "-sg" build serves the same
+# model. The client keeps the logical name; only the outbound id is remapped.
+INTL_MODEL_ALIASES = {
+    "deepseek-v4.1-flash": "deepseek-v4.1-flash-sg",
+}
+
+
+def intl_model_alias_enabled():
+    """The intl id remap is on unless WB_INTL_MODEL_ALIAS disables it."""
+    raw = os.environ.get("WB_INTL_MODEL_ALIAS", "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def intl_model_alias(name, realm=None):
+    """The intl upstream id for `name`, or `name` unchanged."""
+    text = str(name or "")
+    if (realm or get_realm()) != "intl" or not intl_model_alias_enabled():
+        return text
+    return INTL_MODEL_ALIASES.get(text.strip().lower(), text)
+
+
+def apply_intl_model_alias(payload, realm=None):
+    """Rewrite a legacy intl model id in a request body; returns the new id."""
+    if not isinstance(payload, dict):
+        return ""
+    name = str(payload.get("model") or "")
+    target = intl_model_alias(name, realm)
+    if target == name:
+        return name
+    payload["model"] = target
+    log("alias: intl model %s -> %s" % (name, target))
+    return target
+
+
 # Per-account concurrency cap (account_max_concurrent, 0 = unlimited); upstream
 # meters tokens per account, so overloading one earns a 429 and loses its cache.
 _ACCOUNT_INFLIGHT = {}
@@ -109,10 +144,15 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
     Raises RateLimited / ContentRejected / HTTPError / RuntimeError."""
     apply_daily_token_limit(pool)
     realm = target_realm or detect_model_realm(payload.get("model")) or get_realm()
-    model = str(payload.get("model") or "")
+    # Remap the intl-only ids before anything reads the model name, so account
+    # readiness, model windows and the outbound body describe what is sent.
+    model = apply_intl_model_alias(payload, realm)
     # reuse the caller's body when given: rebuilds are pure overhead
     upstream_body = (prebuilt_body if prebuilt_body is not None
                      else build_upstream_body(payload))
+    if upstream_body.get("model") != model:
+        upstream_body = dict(upstream_body)
+        upstream_body["model"] = model
     # Derive a session key from the stable message prefix when the client
     # sends none, after build_upstream_body so it matches what is sent.
     if not session_key:
@@ -385,6 +425,13 @@ def open_upstream(pool, payload, session_key=None, target_realm=None, log=log,
                     pool.affinity.unbind(session_key)
                 last_error = exc
                 continue
+            # `raise` skips the slot release after the loop, so hand the
+            # concurrency seat back first: otherwise the account stays
+            # "serving 1 request" forever and later picks skip it
+            # (account_max_concurrent=1 makes one leaked seat fatal).
+            if slot_held is not None:
+                account_slot_release(slot_held)
+                slot_held = None
             raise
         except Exception as exc:
             if retry.is_tls_verify_error(exc):

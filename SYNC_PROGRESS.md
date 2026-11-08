@@ -5,12 +5,43 @@
 
 | 项 | 值 |
 |---|---|
-| 同步到 | `077fb2f` release: v1.10.9（自 v1.9.1 起为选择性同步，见下） |
+| 同步到 | `6123c54` release: v2.0.3（自 v1.9.1 起为选择性同步，见下） |
 | 分叉点 | `650b659` release: v1.5.4（首次瘦身移植的基线） |
-| 已跟进区间 | v1.5.5 → v1.10.9 |
+| 已跟进区间 | v1.5.5 → v2.0.3 |
 
 同步口径：只跟进已发布的 tag，tag 之后的主干不读。上游 bug 修复照搬；上游新增
 功能加开关且默认关；与「本地独有改动」冲突的一律以本地为准。
+
+上游在 v2.0.0 的发布说明里写了「项目停止维护（2026-11-06）」，但 v2.0.1-v2.0.3
+仍在发布，tag 口径不变。
+
+## v1.10.9 → v2.0.3 选择性同步（80+ commits 中取 6 个）
+
+已取：
+
+| commit | 内容 |
+|---|---|
+| `5546063` + `4358541` | `guard_empty_text_parts`：空 `text` 段（含被上游嗅探器当 parts 解析的字符串数组）出站前填一个空格，避免 400/11151 把会话打退役；`mirror_upstream_reasoning`：kimi/glm/minimax/mimo/step/space-bunny 的 `reasoning_content` 镜像进 `reasoning`，边界为精确名或 `前缀-` |
+| `d319bd0` | Responses 历史推理保真：连续 reasoning 项合并、reasoning 归属下一条 assistant 而非上一条、Chat 形状助手历史的 `reasoning_content`/`tool_calls` 保留、web 工具轮次回传本轮推理与唯一 call id |
+| `4df31cf` | Claude Code 自述首段整句中性化；删掉把 `official CLI tool` 写回去的反向注入规则，并补小写字面量命中 |
+| `2acd180` | 国际版 `deepseek-v4.1-flash` 出站改道 `-sg`（修 6004）；逻辑名保留，`WB_INTL_MODEL_ALIAS=0` 关闭 |
+| `80865aa` | 未处理的上游状态码抛出前归还账号并发名额，避免账号被永久标记「占满」 |
+
+未取（同区间，按废弃清单或与本地契约冲突）：
+
+- `f840546` 可选 Go/uTLS 传输桥：外部二进制，违背零依赖与纯标准库。
+- v2.0.3 的设备 Token、桌面 chat 兼容头（本地 `WB_DESKTOP_CHAT_COMPAT` 已有）、
+  最小输出预算与空输出重试、国内 Kimi 工具 schema `$ref/$defs` 内联：属新功能，
+  本地暂无需求，先不引。
+- `f1de859`（#830 订阅桥）、`def6539`/`7bc095d`（一键启动工作台）、`47c6728`
+  （`-m wb_proxy` 入口）、`d2e26fa`（#841 号池分区）：面板 / 部署 / 多号族。
+- dashboard 布局修复（`8af8fc2`、`d957885`、`f028ecc`、`118395c`）、面板分页与
+  登录槽、settings 分组 i18n、账号筛选重置。
+- `7fd245f` + `826c8ca`（usage checkpoint 锁与补写）：本地 usage 是单次 `os.write`
+  原子追加，无聚合缓存。
+- `537cfde` / `5fcab44` / `edf95cc`（chat head 与 effort 日志）、`def6b7c`（Clash
+  fake-IP 探针放行）、`95a7a03`（日活总开关，本地已有 `daily-chat-web`）。
+- `91d509d` / `c844a8c` CodeArts 相关与 `bf2eadc` 账号筛选：出口/面板族。
 
 ## v1.9.1 → v1.10.9 选择性同步（145 commits 中取 9 个）
 

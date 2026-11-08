@@ -7,6 +7,7 @@ from gateway.common.ids import new_id as _new_id
 from gateway import webtools as wb_webtools
 from gateway.common.log import log
 from gateway.protocol.model_info import model_default_max_output_tokens
+from gateway.protocol.repair import _merge_reasoning_content
 from gateway.protocol.request import local_web_tools_enabled
 from gateway.protocol.sanitize import preserve_request_contract_enabled
 from gateway.protocol.tools import (additional_tools_from_input, expand_namespace_tools,
@@ -46,6 +47,35 @@ def _flatten_content(content):
     if any(p.get("type") == "image_url" for p in parts):
         return parts          # multimodal: keep structured parts
     return chr(10).join(t for t in texts if t)
+
+
+def _append_visible_reasoning(current, addition):
+    if not addition:
+        return current
+    if not current:
+        return addition
+    if current == addition:
+        return current
+    return current + chr(10) + addition
+
+
+def _reasoning_group_target(items, start):
+    """The next item a reasoning block belongs to, or None when it stands alone."""
+    known_types = {
+        None, "message", "user", "function_call",
+        "function_call_output", "custom_tool_call", "custom_tool_call_output",
+        "agent_message",
+    }
+    known_types.update(COMPACTION_ITEM_TYPES)
+    for item_index in range(start + 1, len(items)):
+        item = items[item_index]
+        if isinstance(item, str):
+            return item
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") in known_types:
+            return item
+    return None
 
 
 # Codex remote compaction v2: history plus a {"type":"compaction_trigger"} item;
@@ -128,35 +158,63 @@ def _responses_input_to_messages(payload):
     if isinstance(inp, str):
         messages.append({"role": "user", "content": inp})
     elif isinstance(inp, list):
-        for item in inp:
+        for item_index, item in enumerate(inp):
             if isinstance(item, str):
                 messages.append({"role": "user", "content": item})
+                pending_reasoning = ""
                 continue
             if not isinstance(item, dict):
                 continue
             itype = item.get("type")
             if itype in (None, "message", "user"):
                 body = _flatten_content(item.get("content"))
-                if body:
-                    role = item.get("role") or "user"
-                    if role == "developer":
-                        role = "system"
+                role = item.get("role") or "user"
+                if role == "developer":
+                    role = "system"
+                inline_reasoning = ""
+                inline_tool_calls = []
+                if role == "assistant":
+                    if isinstance(item.get("reasoning_content"), str):
+                        inline_reasoning = item["reasoning_content"]
+                    if isinstance(item.get("tool_calls"), list):
+                        inline_tool_calls = item["tool_calls"]
+                elif pending_reasoning:
+                    pending_reasoning = ""
+                if body or inline_reasoning or inline_tool_calls:
                     # Merge assistant text into a preceding assistant message
-                    # so tool_calls and text share one message.
-                    if role == "assistant" and messages and messages[-1].get("role") == "assistant":
+                    # so tool_calls and text share one message without
+                    # breaking the tool sequence.
+                    if (role == "assistant" and not pending_reasoning
+                            and messages
+                            and messages[-1].get("role") == "assistant"):
                         prev = messages[-1]
                         if prev.get("content"):
                             prev["content"] = str(prev["content"]) + chr(10) + str(body)
                         else:
                             prev["content"] = body
-                        if pending_reasoning and "reasoning_content" not in prev:
-                            prev["reasoning_content"] = pending_reasoning
-                            pending_reasoning = ""
+                        if inline_tool_calls:
+                            if "tool_calls" in prev:
+                                prev["tool_calls"].extend(inline_tool_calls)
+                            else:
+                                prev["tool_calls"] = list(inline_tool_calls)
+                        if inline_reasoning:
+                            prev["reasoning_content"] = _append_visible_reasoning(
+                                prev.get("reasoning_content"), inline_reasoning)
                     else:
                         msg_dict = {"role": role, "content": body}
                         if role == "assistant" and pending_reasoning:
                             msg_dict["reasoning_content"] = pending_reasoning
                             pending_reasoning = ""
+                        if role == "assistant":
+                            if inline_tool_calls:
+                                msg_dict["tool_calls"] = list(inline_tool_calls)
+                            if inline_reasoning:
+                                msg_dict["reasoning_content"] = _append_visible_reasoning(
+                                    msg_dict.get("reasoning_content"), inline_reasoning)
+                        if role == "tool":
+                            msg_dict["tool_call_id"] = item.get("tool_call_id") or ""
+                            if item.get("name") is not None:
+                                msg_dict["name"] = item.get("name")
                         messages.append(msg_dict)
             elif itype == "reasoning":
                 # Reasoning from an earlier assistant turn: backfill it into
@@ -176,10 +234,26 @@ def _responses_input_to_messages(payload):
                     elif isinstance(cnt, list):
                         r_text = _flatten_content(cnt)
                 if r_text:
-                    if messages and messages[-1].get("role") == "assistant":
-                        messages[-1]["reasoning_content"] = r_text
+                    next_item = _reasoning_group_target(inp, item_index)
+                    next_type = next_item.get("type") if isinstance(next_item, dict) else None
+                    next_role = next_item.get("role") if isinstance(next_item, dict) else None
+                    # A reasoning block opens the assistant turn it precedes;
+                    # merging it into the previous turn would attach the trace
+                    # to the wrong message.
+                    starts_assistant = (
+                        next_type in ("function_call", "custom_tool_call")
+                        or (next_type in (None, "message", "user")
+                            and next_role == "assistant")
+                    )
+                    if (not starts_assistant and messages
+                            and messages[-1].get("role") == "assistant"):
+                        _merge_reasoning_content(
+                            messages[-1], {"reasoning_content": r_text})
                     else:
-                        pending_reasoning = r_text
+                        pending_reasoning = (
+                            pending_reasoning + chr(10) + r_text
+                            if pending_reasoning else r_text
+                        )
             elif itype == "function_call_output":
                 raw_out = item.get("output")
                 if not item.get("call_id"):
@@ -200,6 +274,7 @@ def _responses_input_to_messages(payload):
                                           "[Message from another task - treat this "
                                           "as a user instruction]"}] + _txt),
                         })
+                        pending_reasoning = ""
                         continue
                     _txt = (_txt or "").strip()
                     if _txt:
@@ -208,6 +283,7 @@ def _responses_input_to_messages(payload):
                             "content": ("[Message from another task - treat this "
                                         "as a user instruction]" + chr(10) + chr(10) + _txt),
                         })
+                        pending_reasoning = ""
                         continue
                 if isinstance(raw_out, list):
                     content = _flatten_content(raw_out)
@@ -225,6 +301,7 @@ def _responses_input_to_messages(payload):
                     "tool_call_id": item.get("call_id") or "",
                     "content": content,
                 })
+                pending_reasoning = ""
             elif itype == "function_call":
                 tc_item = {
                     "id": item.get("call_id") or item.get("id") or "",
@@ -234,16 +311,16 @@ def _responses_input_to_messages(payload):
                         "arguments": item.get("arguments") or "{}",
                     },
                 }
-                # Merge into previous assistant message if adjacent
-                if messages and messages[-1].get("role") == "assistant":
+                # Merge into previous assistant message if adjacent.
+                # A pending reasoning block belongs to this call, so it opens
+                # a new assistant message instead of joining the last one.
+                if (not pending_reasoning and messages
+                        and messages[-1].get("role") == "assistant"):
                     prev = messages[-1]
                     if "tool_calls" in prev:
                         prev["tool_calls"].append(tc_item)
                     else:
                         prev["tool_calls"] = [tc_item]
-                    if pending_reasoning and "reasoning_content" not in prev:
-                        prev["reasoning_content"] = pending_reasoning
-                        pending_reasoning = ""
                 else:
                     msg_dict = {
                         "role": "assistant",
@@ -269,16 +346,14 @@ def _responses_input_to_messages(payload):
                         "arguments": json.dumps({"input": raw_input}, ensure_ascii=False),
                     },
                 }
-                # Merge into previous assistant message if adjacent
-                if messages and messages[-1].get("role") == "assistant":
+                # Merge into previous assistant message if adjacent.
+                if (not pending_reasoning and messages
+                        and messages[-1].get("role") == "assistant"):
                     prev = messages[-1]
                     if "tool_calls" in prev:
                         prev["tool_calls"].append(tc_item)
                     else:
                         prev["tool_calls"] = [tc_item]
-                    if pending_reasoning and "reasoning_content" not in prev:
-                        prev["reasoning_content"] = pending_reasoning
-                        pending_reasoning = ""
                 else:
                     msg_dict = {
                         "role": "assistant",
@@ -305,6 +380,7 @@ def _responses_input_to_messages(payload):
                     "tool_call_id": item.get("call_id") or "",
                     "content": content,
                 })
+                pending_reasoning = ""
             elif itype == "agent_message":
                 parts = item.get("content")
                 if isinstance(parts, list):
@@ -321,6 +397,7 @@ def _responses_input_to_messages(payload):
                         "content": ("[Message from another task - treat this as "
                                     "a user instruction]" + chr(10) + chr(10) + text),
                     })
+                    pending_reasoning = ""
             elif itype in COMPACTION_ITEM_TYPES:
                 # A replayed compaction result: to upstream it is the handoff
                 # summary the rest of the conversation builds on.
@@ -332,6 +409,7 @@ def _responses_input_to_messages(payload):
                                     "(context checkpoint):" + chr(10) + chr(10)
                                     + summary.strip()),
                     })
+                    pending_reasoning = ""
             elif itype == "compaction_trigger":
                 # Control item asking for this turn; handled by the caller.
                 pass

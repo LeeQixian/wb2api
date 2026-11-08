@@ -103,9 +103,17 @@ CORS 默认关，`--cors` 打开。
 | `WB_MAX_PAYLOAD_BYTES` | 请求体上限，默认 16MB |
 | `WB_STOP_AT_SSE_DONE=1` | 上游流读到 `[DONE]` 即停止，不等 EOF，默认关 |
 | `WB_CACHE_HTTP_ERROR_BODY=1` | 首次读取的错误正文留在异常上供后读复用，默认关 |
+| `WB_INTL_MODEL_ALIAS=0` | 关闭国际版 `deepseek-v4.1-flash` 出站改道 `-sg`，默认开 |
 
 ## 行为要点
 
+- 出站前最后一道形状检查：空 `text` 段（含被上游嗅探成 parts 的字符串数组）补一个
+  空格，避免 `400 / 11151` 让会话退役；kimi / glm / minimax / mimo / step /
+  space-bunny 的 `reasoning_content` 同时镜像到 `reasoning`。
+- 国际版 `deepseek-v4.1-flash` 出站自动改道 `-sg`（账户基础额度桶空时上游报
+  `6004`），响应与用量仍记逻辑模型名。
+- 上游 400 等未处理状态码抛出前归还账号并发名额，`account_max_concurrent` 不会被
+  一次失败永久占满。
 - 429 指数退避 10 分钟到 2 小时；连续硬失败熔断 30 分钟到 6 小时；402 余额不足停放
   至次日本地 04:00，余额恢复提前解冻。连击计数受 `WB_FAIL_WINDOW`（默认 600 秒）
   时间窗约束，超窗从第一档重算。

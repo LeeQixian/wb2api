@@ -475,6 +475,7 @@ class PostRoutes(object):
                 total_usage = None
                 while True:
                     holder.pop("internal_calls", None)
+                    holder.pop("reasoning_content", None)
                     holder.pop("suppress_completion", None)
                     holder["suppress_lifecycle"] = rounds > 0
                     for frame in translate.stream_responses_events(upstream, model, holder):
@@ -495,7 +496,8 @@ class PostRoutes(object):
                         pass
                     upstream, account = translate.follow_up_with_tool_results(
                         _state.POOL, internal, holder, model, session_key, t_start,
-                        drop_tools=give_up)
+                        drop_tools=give_up,
+                        reasoning_content=holder.get("reasoning_content"))
                 if total_usage:
                     holder["usage"] = total_usage
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -542,6 +544,9 @@ class PostRoutes(object):
         upstream = upstream_resp
         # With the switch off, do not intercept same-named calls; those are the client's.
         web_tools = translate.web_tools_active(base_body)
+        holder = {"base_messages": (base_body or {}).get("messages"),
+                  "base_body": base_body, "realm": realm,
+                  "web_sources": sources}
         while True:
             try:
                 chat_obj = translate.aggregate_stream(
@@ -561,13 +566,12 @@ class PostRoutes(object):
                 upstream.close()
             except Exception:
                 pass
-            holder = {"base_messages": (base_body or {}).get("messages"),
-                      "base_body": base_body, "realm": realm,
-                      "web_sources": sources}
+            round_message = ((chat_obj.get("choices") or [{}])[0].get("message") or {})
             try:
                 upstream, account = translate.follow_up_with_tool_results(
                     _state.POOL, calls, holder, model, session_key, t_start,
-                    drop_tools=give_up)
+                    drop_tools=give_up,
+                    reasoning_content=round_message.get("reasoning_content"))
             except Exception as exc:
                 record_row({"model": model, "outcome": "error", "status": 502,
                             "error": "web tool follow-up failed: %s" % str(exc)[:200],

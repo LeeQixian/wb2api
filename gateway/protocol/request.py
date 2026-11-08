@@ -11,7 +11,7 @@ from gateway import webtools as wb_webtools
 from gateway.common.log import log
 from gateway.protocol import state
 from gateway.protocol.model_info import (ALLOWED_MODELS, model_default_effort, model_default_max_output_tokens)
-from gateway.protocol.repair import (backfill_reasoning_content, cleanup_orphan_tool_calls, merge_adjacent_tool_calls, repack_tool_result_blocks)
+from gateway.protocol.repair import (backfill_reasoning_content, cleanup_orphan_tool_calls, guard_empty_text_parts, merge_adjacent_tool_calls, mirror_upstream_reasoning, repack_tool_result_blocks)
 from gateway.protocol.repair import normalize_roles
 from gateway.protocol.sanitize import sanitize_messages
 
@@ -117,7 +117,11 @@ def build_upstream_body(payload):
     repaired, _merged = merge_adjacent_tool_calls(body["messages"])
     repaired, _repacked = repack_tool_result_blocks(repaired)
     repaired, _cleaned = cleanup_orphan_tool_calls(repaired)
-    body["messages"] = repaired
+    # Last shape check: an empty text part is a hard 400 (11151) whichever side
+    # produced it, and it has to run after the merges above because they can
+    # move a string content into a different message.
+    body["messages"] = guard_empty_text_parts(repaired)
+    body["messages"] = mirror_upstream_reasoning(body["messages"], model)
     translate_max_completion_tokens(body)
     # Upstream GPT-family rejects max_output_tokens below 16 with a 400.
     if "max_tokens" in body and str(model).lower().startswith("gpt-"):

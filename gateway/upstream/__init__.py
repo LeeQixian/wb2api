@@ -10,7 +10,10 @@ from gateway.upstream.catalog import (  # noqa: F401
     fetch_remote_product_config, merge_catalog, merge_reasoning, model_entry,
     parse_remote_catalog, snapshot_credits,
 )
-from gateway.upstream.client import AFFINITY_DEBUG, open_upstream  # noqa: F401
+from gateway.upstream.client import (  # noqa: F401
+    AFFINITY_DEBUG, INTL_MODEL_ALIASES, apply_intl_model_alias, intl_model_alias,
+    intl_model_alias_enabled, open_upstream,
+)
 from gateway.upstream.state import (  # noqa: F401
     _POOL, ACCOUNTS_DIR, USAGE_DIR, _lock,
 )

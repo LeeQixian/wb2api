@@ -23,8 +23,6 @@ SANITIZE_FEATURES = (
     "11128",
 )
 SANITIZE_REWRITES = (
-    ("You are Claude Code, Anthropic's official CLI for Claude",
-     "You are Claude Code, Anthropic's official CLI tool for Claude"),
     ("Default branch (you will usually use this for PRs)",
      "Default branch (you will usually use this for PRs)"),
     ("To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
@@ -40,6 +38,15 @@ SANITIZE_CODEX_INTRO_RE = re.compile(
     r"(?i)You are a coding agent running in the Codex CLI(?: tool)?"
     r"[^.\n]*\.")
 SANITIZE_CODEX_INTRO_REPLACEMENT = "You are a helpful AI assistant."
+# Claude Code self-intro (#733): switching prompt mode to "replace" made the
+# 400 disappear, so the fingerprint sits in the system text. Neutralize that
+# one sentence the same way the Codex intro is handled; leave the rest of the
+# Claude Code prompt intact.
+SANITIZE_CLAUDE_CODE_INTRO_RE = re.compile(
+    r"(?i)You are Claude Code,\s*Anthropic['’]s official CLI"
+    r"(?: tool)? for Claude(?: Code)?\.?")
+SANITIZE_CLAUDE_CODE_INTRO_REPLACEMENT = "You are a helpful AI assistant."
+SANITIZE_CLAUDE_CODE_LOWER = "you are claude code,"
 SANITIZE_HDR_RE = re.compile(r"(?i)x-anthropic-billing-header:[^;\r\n]*;?\s*")
 SANITIZE_BARE_HDR_RE = re.compile(r"(?i)x-anthropic-billing-header")
 SANITIZE_KV_RE = re.compile(r"(?i)\bcc_[a-z0-9_]+=[^;\r\n]*;?\s*")
@@ -100,6 +107,10 @@ def has_fingerprint(text, identity=True):
         return True
     if not identity:
         return False
+    # SANITIZE_FEATURES only registers the capitalized "You are Claude Code";
+    # catch mixed-case system text here so sanitize_text's regex can run.
+    if SANITIZE_CLAUDE_CODE_LOWER in low:
+        return True
     if SANITIZE_BRAND_LOWER in low and SANITIZE_BRAND_RE.search(text) is not None:
         return True
     if (SANITIZE_DSH_GUI_LOWER in low
@@ -123,6 +134,10 @@ def sanitize_text(text, identity=True):
     # the confirmed contiguous fingerprint is neutralized.
     text = SANITIZE_OMO_JUNIOR_RE.sub("Sisyphus-Junior - Focused executor", text)
     if identity:
+        # The Claude Code intro is itself a SANITIZE_FEATURES fingerprint, so
+        # replace the whole sentence before the generic identity rules.
+        text = SANITIZE_CLAUDE_CODE_INTRO_RE.sub(
+            SANITIZE_CLAUDE_CODE_INTRO_REPLACEMENT, text)
         # The Codex self-intro sentence goes first: it is itself one of the
         # SANITIZE_FEATURES fingerprints.
         text = SANITIZE_CODEX_INTRO_RE.sub(SANITIZE_CODEX_INTRO_REPLACEMENT, text)

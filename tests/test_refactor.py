@@ -201,6 +201,7 @@ class SchedulerKeepsDisabledAlive(unittest.TestCase):
 
         class Acc(object):
             uid = "u1"
+            nickname = ""
             realm = "cn"
             enabled = False
             expires_at = 9_999_999_999  # far future; skip the token refresh

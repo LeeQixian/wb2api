@@ -269,3 +269,93 @@ def normalize_roles(messages):
             item["role"] = "system"
         out.append(item)
     return out
+
+
+# Empty text parts (upstream code 11151): every `type:"text"` part is length
+# checked, and an empty string is a hard 400 that retires the conversation --
+# every retry then replays the same bad history. The upstream also sniffs a
+# string body that starts with "[" and parses it as a part list, so the same
+# fix applies to sniffer-parsed strings. Fill the value, never drop the part.
+EMPTY_TEXT_PART_FILL = " "
+
+
+def _fill_empty_text_parts(parts):
+    """Give every empty text part a placeholder; True when one was filled."""
+    changed = False
+    for part in parts:
+        if not isinstance(part, dict) or part.get("type") != "text":
+            continue
+        text = part.get("text")
+        if text is None or text == "":
+            part["text"] = EMPTY_TEXT_PART_FILL
+            changed = True
+    return changed
+
+
+def _sniffed_parts(content):
+    """Return the parsed parts when a string body would be read as part list."""
+    if not isinstance(content, str):
+        return None
+    stripped = content.lstrip()
+    if not stripped.startswith("["):
+        return None
+    try:
+        parts = json.loads(stripped)
+    except Exception:
+        return None
+    if not parts or not isinstance(parts, list):
+        return None
+    if not all(isinstance(part, dict) for part in parts):
+        return None
+    return parts
+
+
+def guard_empty_text_parts(messages):
+    """Fill empty text parts, in real part lists and in sniffer-parsed strings."""
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        content = m.get("content")
+        if isinstance(content, list):
+            # Copy only the text parts that need changing; images and every
+            # other part stay the same object.
+            parts = [dict(part) if isinstance(part, dict)
+                     and part.get("type") == "text" else part
+                     for part in content]
+            if _fill_empty_text_parts(parts):
+                m["content"] = parts
+        else:
+            parts = _sniffed_parts(content)
+            if parts is not None and _fill_empty_text_parts(parts):
+                m["content"] = json.dumps(parts, ensure_ascii=False)
+    return messages
+
+
+# Models whose upstream reads the `reasoning` field, not `reasoning_content`.
+# Matching is exact or "prefix-", so "kimiya" never matches "kimi".
+MIRROR_REASONING_PREFIXES = (
+    "kimi", "glm", "minimax", "mimo", "step", "space-bunny",
+)
+
+
+def mirror_upstream_reasoning(messages, model):
+    """Mirror reasoning_content into the upstream reasoning field."""
+    model_name = str(model or "").lower()
+    if not any(model_name == prefix or model_name.startswith(prefix + "-")
+               for prefix in MIRROR_REASONING_PREFIXES):
+        return messages
+    if not isinstance(messages, list):
+        return messages
+    out = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            out.append(message)
+            continue
+        item = dict(message)
+        reasoning_content = item.get("reasoning_content")
+        reasoning = item.get("reasoning")
+        if (isinstance(reasoning_content, str) and reasoning_content.strip()
+                and not (isinstance(reasoning, str) and reasoning.strip())):
+            item["reasoning"] = reasoning_content
+        out.append(item)
+    return out

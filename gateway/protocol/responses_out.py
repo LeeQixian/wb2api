@@ -192,6 +192,9 @@ def stream_responses_events(upstream, model, holder):
         # Close out the stream: reasoning item, structured tool calls,
         # DSML fallback, the message item and response.completed.
         nonlocal msg_index, text_buffer
+        # Hand this round's reasoning to the web-tool follow-up so the next
+        # request replays the trace that asked for the tools.
+        holder["reasoning_content"] = "".join(reason_parts)
         if reason_index is not None and outputs[reason_index] is None:
             full_r = "".join(reason_parts)
             yield ev("response.reasoning_summary_text.done", {
@@ -628,7 +631,7 @@ def stream_responses_events(upstream, model, holder):
 
 
 def follow_up_with_tool_results(pool, internal_calls, holder, model, session_key,
-                                t_start, drop_tools=False):
+                                t_start, drop_tools=False, reasoning_content=None):
     """Run the gateway's own web tools and feed the results back upstream.
     drop_tools=True is the final round; never fake a completed wrapup."""
     convo = holder.get("convo_messages")
@@ -637,13 +640,23 @@ def follow_up_with_tool_results(pool, internal_calls, holder, model, session_key
         holder["convo_messages"] = convo
 
     tool_calls = []
+    # Round number keeps call ids unique across rounds: a repeated id makes the
+    # upstream reject the replayed history.
+    round_number = int(holder.get("_web_tool_round") or 0) + 1
+    holder["_web_tool_round"] = round_number
     for i, c in enumerate(internal_calls):
         tool_calls.append({
-            "id": "call_web_%d_%d" % (int(t_start * 1000) % 1000000, i),
+            "id": "call_web_%d_%d_%d" % (int(t_start * 1000) % 1000000,
+                                         round_number, i),
             "type": "function",
             "function": {"name": c["name"], "arguments": c.get("arguments") or "{}"},
         })
-    convo.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
+    assistant = {"role": "assistant", "content": None, "tool_calls": tool_calls}
+    # The reasoning of the round that asked for these tools belongs to this
+    # assistant message; dropping it loses the trace on the next turn.
+    if isinstance(reasoning_content, str) and reasoning_content:
+        assistant["reasoning_content"] = reasoning_content
+    convo.append(assistant)
 
     for tc in tool_calls:
         nm = tc["function"]["name"]
